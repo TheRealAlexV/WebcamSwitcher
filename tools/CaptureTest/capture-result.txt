@@ -1,0 +1,17 @@
+=== WebcamSwitcher CaptureTest ===
+VirtualCameraService.Start = True
+Cameras:
+  - HD Pro Webcam C920
+  - EOS Webcam Utility
+  - OsmoPocket3
+  - SplitCam Video Driver
+  - CaptureTest Vcam (Windows Virtual Camera)
+Started 2 camera sources
+Frame 1 (active=0 HD Pro Webcam C920): 1920x1080 Nv12
+FRAME1: OK (1920x1080)
+Frame 2 (active=1 OsmoPocket3): 1920x1080 Nv12
+FRAME2: OK (1920x1080)
+Clients connected: 1
+RESULT: OK
+=== DONE ===
+DONE 
