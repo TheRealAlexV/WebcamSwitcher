@@ -1,34 +1,129 @@
 # WebcamSwitcher
 
-Windows 11 USB webcam switcher that composites **two USB webcams** into a single
+A Windows 11 desktop app that composites **two USB webcams** into a single
 **custom Media Foundation virtual camera**, switchable via configurable **global
-hotkeys**. Compatible with NVIDIA Broadcast, Zoom, Teams, OBS, and browsers.
-
-> Status: under active development.
+hotkeys**. The virtual camera works as a normal webcam input in Zoom, Teams,
+OBS, browsers, and **NVIDIA Broadcast**.
 
 ## How it works
 
-1. `WebcamSwitcher.App` (WPF, user session) captures **two physical cameras
-   simultaneously** in non-blocking share mode (so other apps can keep using the
-   cameras) and normalizes the *active* camera to a fixed format (default
-   1920x1080 @ 30fps NV12).
-2. It publishes the selected frames over a local named pipe.
-3. `WebcamSwitcher.Source` (native C++ COM media source, loaded by the Windows
+1. `WebcamSwitcher.App` (WPF, runs in your user session) captures **two physical
+   cameras simultaneously in non-blocking share mode** — other apps can keep
+   using the same cameras.
+2. The *active* camera's frames are normalized to a fixed format (default
+   **1920x1080 @ 30fps NV12**) in software.
+3. Frames are published over a local named pipe.
+4. `WebcamSwitcher.Source` (native C++ COM media source, loaded by the Windows
    Frame Server) exposes a **virtual camera** that emits those frames.
-4. Global hotkeys switch the active camera instantly (per-camera keys + a rotate
-   key).
+5. Global hotkeys switch the active camera instantly.
+
+```
+ Cam A ─┐                                    ┌─ Tray / Hotkeys / Settings
+ Cam B ─┼─▶ normalize ─▶ named pipe ─▶ C++ source ─▶ "WebcamSwitcher Virtual Camera"
+        │  (share mode)          (cross-session)     └─▶ Zoom / OBS / NVIDIA Broadcast
+```
 
 ## Requirements
 
-- Windows 11 (build 22000+ for the virtual camera; build 26100+ recommended for
-  non-blocking share mode).
-- .NET 9 runtime (for the app) and the VC++ redistributable (for the source DLL).
+- **Windows 11** (build 22000+ for the virtual camera; build 26100+ recommended
+  for non-blocking share mode).
+- x64 CPU.
+- No code-signing certificate or kernel driver is required — the virtual camera
+  is a user-mode Media Foundation media source.
+
+## Installation
+
+Download the installer from [Releases](../../releases) and run it. The installer
+requires administrator rights once (to register the media source in `HKLM`).
+
+### Manual install (no installer)
+
+1. Copy the build output (the self-contained app folder) somewhere stable, e.g.
+   `C:\Program Files\WebcamSwitcher\`.
+2. Register the media source once, from an **elevated** command prompt:
+   ```
+   regsvr32 "C:\Program Files\WebcamSwitcher\WebcamSwitcher.Source.dll"
+   ```
+3. Run `WebcamSwitcher.exe`.
+
+## Usage
+
+- The **system tray icon** shows the app; double-click to open the window.
+- The main window shows **live previews** of both cameras; click a preview (or
+  press its hotkey) to make that camera active. The green border marks the
+  active camera.
+- **Default hotkeys** (configurable in Settings):
+  - `Ctrl+Alt+1` — camera 1
+  - `Ctrl+Alt+2` — camera 2
+  - `Ctrl+Alt+N` — rotate through all cameras
+- The virtual camera appears in other apps as
+  **"WebcamSwitcher Virtual Camera (Windows Virtual Camera)"**.
+
+### NVIDIA Broadcast
+
+1. Start WebcamSwitcher and confirm the virtual camera is active.
+2. In NVIDIA Broadcast, open **Camera** settings and select
+   **WebcamSwitcher Virtual Camera** as the input source.
+3. Use NVIDIA Broadcast's own virtual camera as the output in your conferencing
+   app.
+
+> The virtual camera registers in the standard Windows `VideoCapture` device
+> enumeration (the same list NVIDIA Broadcast uses). If a specific app doesn't
+> list it, it's most likely enumerating only physical/driver-backed cameras.
+
+## Configuration
+
+Settings are stored in
+`%APPDATA%\WebcamSwitcher\config.json` and are editable from the Settings window
+(hotkeys) or directly (camera assignment):
+
+```jsonc
+{
+  "Width": 1920,
+  "Height": 1080,
+  "Fps": 30,
+  "Cameras": [
+    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "HD Pro Webcam C920" },
+    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "OsmoPocket3" }
+  ],
+  "ActiveIndex": 0,
+  "Hotkeys": [ "Ctrl+Alt+1", "Ctrl+Alt+2" ],
+  "RotateHotkey": "Ctrl+Alt+N"
+}
+```
+
+- `Cameras` — the two (or more) cameras to capture. `DeviceId` is the stable
+  device ID; if left empty, the first two physical cameras are used
+  automatically.
+- `Hotkeys` — one per camera, in order. Format: `Modifier+Modifier+Key`
+  (e.g. `Ctrl+Alt+1`, `Ctrl+Shift+F2`, `Alt+N`).
+- `RotateHotkey` — single key that cycles through all cameras.
 
 ## Building
 
-See `docs/architecture.md` and `build.ps1`.
+Prerequisites: Visual Studio 2022 (with the C++ toolset) and the .NET 9 SDK.
+
+```
+powershell -File build.ps1
+```
+
+This produces a self-contained app in `artifacts/app` (the `.exe` + the
+virtual-camera `WebcamSwitcher.Source.dll`). The installer (Inno Setup) is built
+by CI; run the `.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to
+build it locally.
+
+## Project layout
+
+```
+src/WebcamSwitcher.Source/   C++ COM media source (the virtual camera)
+src/WebcamSwitcher.Core/     C# capture/normalize/publish engine + vcam service
+src/WebcamSwitcher.App/      WPF app (tray, hotkeys, settings, previews)
+src/WebcamSwitcher.Shared/   frame transport protocol (C header)
+installer/                   Inno Setup script
+tools/                       dev/test harnesses (smoke test, capture test)
+```
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Portions derived from MIT-licensed reference code;
-see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT — see [LICENSE](LICENSE). Portions derived from MIT-licensed reference
+code; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
