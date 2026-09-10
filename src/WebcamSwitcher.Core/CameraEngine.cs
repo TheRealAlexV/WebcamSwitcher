@@ -60,10 +60,17 @@ public sealed class CameraEngine : IAsyncDisposable
                     Publish(nv12, w, h);
             };
 
+            AppLog.Write($"Engine.StartAsync: starting camera {i} '{c.FriendlyName}'");
             if (await source.StartAsync(w, h))
+            {
                 _sources.Add(source);
+                AppLog.Write($"Engine.StartAsync: camera {i} started");
+            }
             else
+            {
                 await source.DisposeAsync();
+                AppLog.Write($"Engine.StartAsync: camera {i} FAILED to start");
+            }
         }
 
         _publisher.Start();
@@ -90,7 +97,11 @@ public sealed class CameraEngine : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         foreach (var s in _sources)
+        {
+            AppLog.Write($"Engine.Dispose: disposing source '{s.DisplayName}'");
             await s.DisposeAsync();
+            AppLog.Write($"Engine.Dispose: source disposed '{s.DisplayName}'");
+        }
         _sources.Clear();
         // Note: the publisher is owned by the caller (PipelineController), not
         // this engine, so it is not disposed here.

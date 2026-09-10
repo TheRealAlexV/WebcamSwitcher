@@ -126,6 +126,17 @@ virtual-camera `WebcamSwitcher.Source.dll`). The installer (Inno Setup) is built
 by CI; run the `.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to
 build it locally.
 
+## Testing
+
+- `tools/UiTest` is a FlaUI (UI Automation) harness that launches the app,
+  opens Settings, verifies the camera dropdowns render real names, selects a
+  camera + changes the output format, clicks **Apply**, and asserts the dialog
+  closes. Run it from the interactive desktop session (e.g. via a scheduled
+  task), since UI Automation can't see Session 0.
+- `tools/SmokeTest`, `tools/CaptureTest`, and `tools/FormatApplyTest` cover the
+  virtual-camera registration, cross-session pipe, capture/normalization, and
+  format-change paths headlessly.
+
 ## Project layout
 
 ```

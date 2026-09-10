@@ -65,7 +65,7 @@ public partial class SettingsWindow : Window
 
     private void AddRow(CameraConfig? cam, string hotkey)
     {
-        var row = new CameraRow(_devices, cam, hotkey, RemoveRow);
+        var row = new CameraRow(_devices, cam, hotkey, RemoveRow, _rows.Count);
         _rows.Add(row);
         CamerasPanel.Children.Add(row.Panel);
     }
@@ -146,14 +146,19 @@ public partial class SettingsWindow : Window
 
         public CameraConfig? SelectedCamera => Combo.SelectedItem as CameraConfig;
 
-        public CameraRow(List<CameraConfig> devices, CameraConfig? selected, string hotkey, Action<CameraRow> remove)
+        public CameraRow(List<CameraConfig> devices, CameraConfig? selected, string hotkey, Action<CameraRow> remove, int index)
         {
             Combo = new ComboBox
             {
                 Width = 220,
-                ItemsSource = devices,
-                DisplayMemberPath = nameof(CameraConfig.FriendlyName)
+                ItemsSource = devices
             };
+            // Explicit ItemTemplate so both the dropdown items AND the closed
+            // selection box render FriendlyName (DisplayMemberPath is not used by
+            // SelectionBoxItemTemplate in a custom ComboBox template).
+            if (System.Windows.Application.Current.FindResource("CameraItemTemplate") is System.Windows.DataTemplate template)
+                Combo.ItemTemplate = template;
+            System.Windows.Automation.AutomationProperties.SetAutomationId(Combo, "CameraCombo" + index);
             if (selected != null)
                 Combo.SelectedItem = devices.FirstOrDefault(d => d.DeviceId == selected.DeviceId) ?? selected;
 

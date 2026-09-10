@@ -56,12 +56,17 @@ public sealed class CameraSource : IAsyncDisposable
         _nv12 = new byte[Protocol.Nv12Size(outWidth, outHeight)];
         _preview = new byte[PreviewWidth * PreviewHeight * 4];
 
+        AppLog.Write($"Source.StartAsync({DisplayName}): finding group");
         var groups = await MediaFrameSourceGroup.FindAllAsync();
         var group = groups.FirstOrDefault(g => g.Id == DeviceId);
         if (group == null)
+        {
+            AppLog.Write($"Source.StartAsync({DisplayName}): group NOT FOUND");
             return false;
+        }
 
         _capture = new MediaCapture();
+        AppLog.Write($"Source.StartAsync({DisplayName}): InitializeAsync");
         await _capture.InitializeAsync(new MediaCaptureInitializationSettings
         {
             SourceGroup = group,
@@ -74,8 +79,10 @@ public sealed class CameraSource : IAsyncDisposable
         if (colorSource == null)
             return false;
 
+        AppLog.Write($"Source.StartAsync({DisplayName}): CreateFrameReaderAsync");
         _reader = await _capture.CreateFrameReaderAsync(colorSource);
         _reader.FrameArrived += OnFrameArrived;
+        AppLog.Write($"Source.StartAsync({DisplayName}): reader StartAsync");
         await _reader.StartAsync();
         Running = true;
         return true;
@@ -138,12 +145,15 @@ public sealed class CameraSource : IAsyncDisposable
             if (_reader != null)
             {
                 _reader.FrameArrived -= OnFrameArrived;
+                AppLog.Write($"Source.Dispose({DisplayName}): StopAsync");
                 await _reader.StopAsync();
+                AppLog.Write($"Source.Dispose({DisplayName}): StopAsync done");
             }
         }
         catch { }
 
         _reader = null;
+        AppLog.Write($"Source.Dispose({DisplayName}): MediaCapture.Dispose");
         _capture?.Dispose();
         _capture = null;
         Running = false;

@@ -155,7 +155,8 @@ public sealed class FramePublisher : IDisposable
             return;
 
         _cts.Cancel();
-        try { _acceptTask?.Wait(1000); } catch { }
+        UnblockAccept();
+        try { _acceptTask?.Wait(2000); } catch { }
         lock (_lock)
         {
             foreach (var h in _clients)
@@ -168,5 +169,26 @@ public sealed class FramePublisher : IDisposable
         if (_securityDescriptor != IntPtr.Zero)
             NativeInterop.LocalFree(_securityDescriptor);
         _cts.Dispose();
+    }
+
+    // Connects a throwaway client so a pending ConnectNamedPipe in AcceptLoop returns
+    // and the loop can observe cancellation and exit (otherwise it would block forever
+    // and leak a pipe instance + thread across rebuilds).
+    private static void UnblockAccept()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            try
+            {
+                IntPtr h = NativeInterop.CreateFileW(Protocol.PipeName, NativeInterop.GenericRead, NativeInterop.FileShareRead | NativeInterop.FileShareWrite, IntPtr.Zero, NativeInterop.OpenExisting, 0, IntPtr.Zero);
+                if (h != (IntPtr)(-1))
+                {
+                    NativeInterop.CloseHandle(h);
+                    return;
+                }
+            }
+            catch { }
+            Thread.Sleep(20);
+        }
     }
 }

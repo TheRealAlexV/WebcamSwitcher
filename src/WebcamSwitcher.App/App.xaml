@@ -7,6 +7,9 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Themes/Dark.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+            <DataTemplate x:Key="CameraItemTemplate">
+                <TextBlock Text="{Binding FriendlyName}"/>
+            </DataTemplate>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

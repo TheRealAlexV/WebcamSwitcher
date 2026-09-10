@@ -22,10 +22,20 @@ public static class NativeInterop
     public const uint PipeWait = 0x0;
     public const uint PipeUnlimitedInstances = 255;
 
+    public const uint GenericRead = 0x80000000;
+    public const uint FileShareRead = 0x1;
+    public const uint FileShareWrite = 0x2;
+    public const uint OpenExisting = 0x3;
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr CreateNamedPipeW(
         string name, uint openMode, uint pipeMode, uint maxInstances,
         uint outBuf, uint inBuf, uint defaultTimeout, IntPtr secAttr);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateFileW(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+        uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool ConnectNamedPipe(IntPtr pipe, IntPtr overlapped);

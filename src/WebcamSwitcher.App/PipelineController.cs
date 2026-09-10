@@ -50,6 +50,7 @@ public sealed class PipelineController : IAsyncDisposable
     public async Task ApplyAsync(AppConfig next)
     {
         next.Normalize();
+        AppLog.Write($"ApplyAsync begin format={next.Width}x{next.Height}@{next.Fps} cams={next.Cameras.Count}");
 
         bool formatChanged = next.Width != _config.Width || next.Height != _config.Height || next.Fps != _config.Fps;
         bool camerasChanged = !CamerasEqual(next.Cameras, _config.Cameras);
@@ -59,40 +60,72 @@ public sealed class PipelineController : IAsyncDisposable
         _config = next;
 
         if (formatChanged)
-        {
             SourceFormatFile.Write(_config.Width, _config.Height, _config.Fps);
-            _vcam.Stop();
-            _vcamOk = _vcam.Start();
-        }
 
         bool engineChanged = formatChanged || camerasChanged;
         if (engineChanged)
         {
+            AppLog.Write("ApplyAsync: engine changed -> rebuild");
             await RebuildPipelineAsync();
+            AppLog.Write("ApplyAsync: rebuild done");
             SourcesChanged?.Invoke();
         }
 
+        if (formatChanged)
+        {
+            // Restart the virtual camera (off the UI thread) so it re-advertises
+            // the new format. Done after the engine rebuild so the physical
+            // cameras are already released before MFShutdown.
+            await Task.Run(() =>
+            {
+                AppLog.Write("ApplyAsync: vcam Stop begin");
+                _vcam.Stop();
+                AppLog.Write("ApplyAsync: vcam Stop done");
+                _vcamOk = _vcam.Start();
+                AppLog.Write("ApplyAsync: vcam Start done");
+            });
+            AppLog.Write("ApplyAsync: vcam restarted");
+        }
+
         if (engineChanged || hotkeysChanged)
+        {
+            AppLog.Write("ApplyAsync: rebuild hotkeys");
             RebuildHotkeys();
+        }
 
         if (startupChanged)
             ApplyStartWithWindows(_config.StartWithWindows);
+
+        AppLog.Write("ApplyAsync end");
     }
 
     private async Task RebuildPipelineAsync()
     {
+        // Run camera teardown/init off the UI thread so a slow or stuck capture
+        // operation can never freeze the UI.
+        await Task.Run(RebuildPipelineCoreAsync);
+    }
+
+    private async Task RebuildPipelineCoreAsync()
+    {
         if (_engine != null)
         {
+            AppLog.Write("Rebuild: dispose engine begin");
             await _engine.DisposeAsync();
+            AppLog.Write("Rebuild: dispose engine end");
             _engine = null;
         }
         var oldPublisher = _publisher;
         _publisher = null;
+        AppLog.Write("Rebuild: dispose publisher begin");
         oldPublisher?.Dispose();
+        AppLog.Write("Rebuild: dispose publisher end");
 
         _publisher = new FramePublisher(_config.Width, _config.Height, _config.Fps);
         var engine = new CameraEngine(_publisher);
+        AppLog.Write("Rebuild: engine StartAsync begin");
         await engine.StartAsync(_config);
+        AppLog.Write("Rebuild: engine StartAsync end");
         _engine = engine;
     }
 
