@@ -24,7 +24,11 @@ public sealed class CameraSource : IAsyncDisposable
     private MediaCapture? _capture;
     private MediaFrameReader? _reader;
     private byte[] _nv12 = Array.Empty<byte>();
+    private byte[] _preview = Array.Empty<byte>();
     private readonly object _lock = new();
+
+    public const int PreviewWidth = 320;
+    public const int PreviewHeight = 180;
 
     public string DeviceId { get; }
     public string DisplayName { get; }
@@ -35,6 +39,9 @@ public sealed class CameraSource : IAsyncDisposable
 
     /// <summary>Raised with the latest normalized NV12 frame (buffer is reused).</summary>
     public event Action<byte[]>? FrameReady;
+
+    /// <summary>Raised with the latest downscaled Bgra8 preview (buffer is reused).</summary>
+    public event Action<byte[], int, int>? PreviewReady;
 
     public CameraSource(string deviceId, string displayName)
     {
@@ -47,6 +54,7 @@ public sealed class CameraSource : IAsyncDisposable
         OutputWidth = outWidth;
         OutputHeight = outHeight;
         _nv12 = new byte[Protocol.Nv12Size(outWidth, outHeight)];
+        _preview = new byte[PreviewWidth * PreviewHeight * 4];
 
         var groups = await MediaFrameSourceGroup.FindAllAsync();
         var group = groups.FirstOrDefault(g => g.Id == DeviceId);
@@ -106,12 +114,21 @@ public sealed class CameraSource : IAsyncDisposable
         using var reference = buffer.CreateReference();
         ((IMemoryBufferByteAccess)reference).GetBuffer(out byte* data, out uint _);
 
-        byte[] nv12;
-        lock (_lock)
-            nv12 = _nv12;
+        byte* src = data + plane.StartIndex;
 
-        ColorConverter.Bgra8ToNv12(data + plane.StartIndex, plane.Width, plane.Height, (int)plane.Stride, nv12, OutputWidth, OutputHeight);
+        byte[] nv12;
+        byte[] preview;
+        lock (_lock)
+        {
+            nv12 = _nv12;
+            preview = _preview;
+        }
+
+        ColorConverter.Bgra8ToNv12(src, plane.Width, plane.Height, (int)plane.Stride, nv12, OutputWidth, OutputHeight);
         FrameReady?.Invoke(nv12);
+
+        ColorConverter.Bgra8Downscale(src, plane.Width, plane.Height, (int)plane.Stride, preview, PreviewWidth, PreviewHeight);
+        PreviewReady?.Invoke(preview, PreviewWidth, PreviewHeight);
     }
 
     public async ValueTask DisposeAsync()

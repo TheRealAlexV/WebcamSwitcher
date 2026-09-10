@@ -101,4 +101,30 @@ public static class ColorConverter
         float bot = c + (d - c) * fx;
         return top + (bot - top) * fy;
     }
+
+    /// <summary>Nearest-neighbor downscale of Bgra8 pixels (for UI previews).</summary>
+    public static unsafe void Bgra8Downscale(
+        byte* src, int srcW, int srcH, int srcStride,
+        byte[] dst, int dstW, int dstH)
+    {
+        fixed (byte* dstPtr = dst)
+        {
+            for (int y = 0; y < dstH; y++)
+            {
+                int sy = Math.Min(srcH - 1, y * srcH / dstH);
+                byte* srow = src + sy * srcStride;
+                byte* drow = dstPtr + y * dstW * 4;
+                for (int x = 0; x < dstW; x++)
+                {
+                    int sx = Math.Min(srcW - 1, x * srcW / dstW);
+                    byte* sp = srow + sx * 4;
+                    byte* dp = drow + x * 4;
+                    dp[0] = sp[0];
+                    dp[1] = sp[1];
+                    dp[2] = sp[2];
+                    dp[3] = 255;
+                }
+            }
+        }
+    }
 }
