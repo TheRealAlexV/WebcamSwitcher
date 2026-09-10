@@ -49,7 +49,9 @@ jobs:
         shell: powershell
         run: |
           choco install innosetup -y --no-progress
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\WebcamSwitcher.iss
+          $iscc = (Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe", "C:\InnoSetup6\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          if (-not $iscc) { $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source }
+          & $iscc installer\WebcamSwitcher.iss
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -20,7 +20,7 @@ OutputBaseFilename=WebcamSwitcher-Setup-{#MyAppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
@@ -30,7 +30,7 @@ Source: "..\artifacts\app\*"; DestDir: "{app}"; Flags: ignoreversion recursesubd
 Filename: "{sys}\regsvr32.exe"; Parameters: "/s ""{app}\WebcamSwitcher.Source.dll"""; Flags: runhidden; StatusMsg: "Registering virtual camera..."
 
 [UninstallRun]
-Filename: "{sys}\regsvr32.exe"; Parameters: "/u /s ""{app}\WebcamSwitcher.Source.dll"""; Flags: runhidden
+Filename: "{sys}\regsvr32.exe"; Parameters: "/u /s ""{app}\WebcamSwitcher.Source.dll"""; Flags: runhidden; RunOnceId: "UnregisterSource"
 
 [Tasks]
 Name: "startup"; Description: "Run {#MyAppName} at Windows startup"; GroupDescription: "Additional tasks:"
