@@ -1,0 +1,31 @@
+# Build outputs (C++ / MSVC)
+**/x64/
+**/Debug/
+**/Release/
+**/.vs/
+*.user
+*.suo
+*.vcxproj.user
+*.tlog
+*.lastbuildstate
+*.pdb
+*.ilk
+*.exp
+
+# NuGet packages (C++ packages.config)
+**/packages/
+
+# .NET
+**/bin/
+**/obj/
+**/out/
+*.nupkg
+
+# Build artifacts
+artifacts/
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/

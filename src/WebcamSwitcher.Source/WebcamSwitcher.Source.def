@@ -1,0 +1,8 @@
+LIBRARY "WebcamSwitcher.Source"
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
+    DllRegisterServer   PRIVATE
+    DllUnregisterServer PRIVATE
+    WebcamSwitcher_Start
+    WebcamSwitcher_Stop
