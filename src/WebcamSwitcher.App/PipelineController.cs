@@ -19,6 +19,7 @@ public sealed class PipelineController : IAsyncDisposable
 
     public AppConfig Config => _config;
     public bool VirtualCameraActive => _vcamOk;
+    public bool CaptureActive => _engine != null;
     public CameraEngine? Engine => _engine;
     public IReadOnlyList<CameraSource> Sources => _engine?.Sources ?? Array.Empty<CameraSource>();
 
@@ -34,6 +35,10 @@ public sealed class PipelineController : IAsyncDisposable
 
     /// <summary>Raised when the source set changed (UI should rebind previews/tray).</summary>
     public event Action? SourcesChanged;
+    /// <summary>Raised when the virtual camera is started or stopped.</summary>
+    public event Action? VirtualCameraStateChanged;
+    /// <summary>Raised when capture is started or stopped.</summary>
+    public event Action? CaptureStateChanged;
 
     public async Task StartAsync(AppConfig config)
     {
@@ -42,7 +47,9 @@ public sealed class PipelineController : IAsyncDisposable
         SourceFormatFile.Write(_config.Width, _config.Height, _config.Fps);
         ApplyStartWithWindows(_config.StartWithWindows);
 
-        _vcamOk = _vcam.Start();
+        // The virtual camera starts disabled unless the user opted in.
+        if (_config.VirtualCameraOnLaunch)
+            _vcamOk = _vcam.Start();
         await RebuildPipelineAsync();
         RebuildHotkeys();
     }
@@ -71,11 +78,11 @@ public sealed class PipelineController : IAsyncDisposable
             SourcesChanged?.Invoke();
         }
 
-        if (formatChanged)
+        if (formatChanged && _vcamOk)
         {
             // Restart the virtual camera (off the UI thread) so it re-advertises
             // the new format. Done after the engine rebuild so the physical
-            // cameras are already released before MFShutdown.
+            // cameras are already released. Only restarted if it was already on.
             await Task.Run(() =>
             {
                 AppLog.Write("ApplyAsync: vcam Stop begin");
@@ -97,6 +104,57 @@ public sealed class PipelineController : IAsyncDisposable
             ApplyStartWithWindows(_config.StartWithWindows);
 
         AppLog.Write("ApplyAsync end");
+    }
+
+    public void StartVirtualCamera()
+    {
+        if (_vcamOk)
+            return;
+        _vcamOk = _vcam.Start();
+        AppLog.Write($"StartVirtualCamera: {(_vcamOk ? "ok" : "failed")}");
+        VirtualCameraStateChanged?.Invoke();
+    }
+
+    public void StopVirtualCamera()
+    {
+        if (!_vcamOk)
+            return;
+        _vcam.Stop();
+        _vcamOk = false;
+        AppLog.Write("StopVirtualCamera");
+        VirtualCameraStateChanged?.Invoke();
+    }
+
+    public async Task StartCaptureAsync()
+    {
+        if (_engine != null)
+            return;
+        AppLog.Write("StartCapture");
+        await RebuildPipelineAsync();
+        RebuildHotkeys();
+        SourcesChanged?.Invoke();
+        CaptureStateChanged?.Invoke();
+    }
+
+    public async Task StopCaptureAsync()
+    {
+        if (_engine == null)
+            return;
+        AppLog.Write("StopCapture");
+        await Task.Run(async () =>
+        {
+            if (_engine != null)
+            {
+                await _engine.DisposeAsync();
+                _engine = null;
+            }
+            var p = _publisher;
+            _publisher = null;
+            p?.Dispose();
+        });
+        RebuildHotkeys();
+        SourcesChanged?.Invoke();
+        CaptureStateChanged?.Invoke();
     }
 
     private async Task RebuildPipelineAsync()

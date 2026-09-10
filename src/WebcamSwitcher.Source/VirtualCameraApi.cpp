@@ -55,5 +55,7 @@ extern "C" __declspec(dllexport) void WebcamSwitcher_Stop(_In_opt_ void* handle)
 		vcam->Shutdown();
 		vcam->Release();
 	}
-	MFShutdown();
+	// NOTE: deliberately no MFShutdown() here. The app may still be capturing
+	// with MediaCapture, and shutting down the MF platform underneath it is
+	// unsafe. The platform is left initialized for the process lifetime.
 }

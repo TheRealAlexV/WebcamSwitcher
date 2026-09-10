@@ -18,8 +18,38 @@ public partial class MainWindow : Window
         _pipeline = pipeline;
         Previews.ItemsSource = _previews;
         _pipeline.SourcesChanged += OnSourcesChanged;
+        _pipeline.VirtualCameraStateChanged += OnStateChanged;
+        _pipeline.CaptureStateChanged += OnStateChanged;
 
         RebuildPreviews();
+        UpdateToggles();
+    }
+
+    private void OnStateChanged() => Dispatcher.BeginInvoke(UpdateToggles);
+
+    private void UpdateToggles()
+    {
+        VcamToggle.Content = _pipeline.VirtualCameraActive ? "Virtual Camera: ON" : "Virtual Camera: OFF";
+        CaptureToggle.Content = _pipeline.CaptureActive ? "Cameras: ON" : "Cameras: OFF";
+        UpdateStatus();
+    }
+
+    private void VcamToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pipeline.VirtualCameraActive)
+            _pipeline.StopVirtualCamera();
+        else
+            _pipeline.StartVirtualCamera();
+        UpdateToggles();
+    }
+
+    private async void CaptureToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pipeline.CaptureActive)
+            await _pipeline.StopCaptureAsync();
+        else
+            await _pipeline.StartCaptureAsync();
+        UpdateToggles();
     }
 
     private void OnSourcesChanged() => Dispatcher.BeginInvoke(RebuildPreviews);
@@ -78,9 +108,11 @@ public partial class MainWindow : Window
     private void UpdateStatus()
     {
         var cfg = _pipeline.Config;
-        StatusText.Text = _pipeline.VirtualCameraActive
-            ? $"{_pipeline.Sources.Count} camera(s) · {cfg.Width}x{cfg.Height} @ {cfg.Fps}fps · virtual camera active"
-            : $"{_pipeline.Sources.Count} camera(s) · virtual camera NOT registered";
+        var cam = _pipeline.CaptureActive
+            ? $"{_pipeline.Sources.Count} camera(s) · {cfg.Width}x{cfg.Height} @ {cfg.Fps}fps"
+            : "capture stopped";
+        var vcam = _pipeline.VirtualCameraActive ? "vCam ON" : "vCam OFF";
+        StatusText.Text = $"{cam} · {vcam}";
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e)

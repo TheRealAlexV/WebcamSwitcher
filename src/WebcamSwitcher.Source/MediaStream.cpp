@@ -41,6 +41,7 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 	MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, _fpsNum, _fpsDen);
 	UINT64 bitrate = (UINT64)_width * _height * 3 / 2 * 8 * _fpsNum / _fpsDen;
 	nv12Type->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)bitrate);
+	nv12Type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
 	MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
 	IMFMediaType* types[] = { nv12Type.get() };
@@ -171,8 +172,10 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	DWORD curLen = 0;
 	RETURN_IF_FAILED(buffer->Lock(&data, &maxLen, &curLen));
 
-	// Start with black.
-	memset(data, 0, maxLen);
+	// Fill with legal limited-range NV12 black (Y=16, U=V=128). All-zero NV12
+	// decodes as GREEN under BT.601 limited range.
+	memset(data, 0x10, ySize);               // Y plane = 16
+	memset(data + ySize, 0x80, ySize / 2);   // interleaved U/V = 128
 
 	if (_client)
 	{

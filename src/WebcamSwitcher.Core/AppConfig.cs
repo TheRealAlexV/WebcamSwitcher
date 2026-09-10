@@ -20,6 +20,9 @@ public class AppConfig
     public bool StartWithWindows { get; set; }
     public bool StartMinimized { get; set; }
 
+    /// <summary>Whether the virtual camera is registered/enabled at app launch.</summary>
+    public bool VirtualCameraOnLaunch { get; set; }
+
     /// <summary>Clamps/repairs values so they are always valid before use.</summary>
     public void Normalize()
     {

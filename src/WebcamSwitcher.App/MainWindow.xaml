@@ -43,6 +43,12 @@
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
             <TextBlock x:Name="StatusText" Foreground="#CCC" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <Button x:Name="VcamToggle" Content="Virtual Camera: OFF" Padding="10,6" Click="VcamToggle_Click"
+                    Background="#333" Foreground="White" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="VcamToggle"/>
+            <Button x:Name="CaptureToggle" Content="Cameras: ON" Padding="10,6" Click="CaptureToggle_Click"
+                    Background="#333" Foreground="White" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="CaptureToggle"/>
             <Button Content="Settings" Padding="14,6" Click="Settings_Click" Background="#333" Foreground="White"
                     AutomationProperties.AutomationId="SettingsButton"/>
         </StackPanel>

@@ -3,6 +3,7 @@ using Windows.Devices.Enumeration;
 using Windows.Graphics.Imaging;
 using Windows.Media.Capture;
 using Windows.Media.Capture.Frames;
+using Windows.Media.MediaProperties;
 
 namespace WebcamSwitcher.Core;
 
@@ -26,6 +27,8 @@ public sealed class CameraSource : IAsyncDisposable
     private byte[] _nv12 = Array.Empty<byte>();
     private byte[] _preview = Array.Empty<byte>();
     private readonly object _lock = new();
+    private int _nullFrames;
+    private int _firstFrameLogged;
 
     public const int PreviewWidth = 320;
     public const int PreviewHeight = 180;
@@ -80,12 +83,37 @@ public sealed class CameraSource : IAsyncDisposable
             return false;
 
         AppLog.Write($"Source.StartAsync({DisplayName}): CreateFrameReaderAsync");
-        _reader = await _capture.CreateFrameReaderAsync(colorSource);
+        _reader = await StartReaderAsync(colorSource);
         _reader.FrameArrived += OnFrameArrived;
-        AppLog.Write($"Source.StartAsync({DisplayName}): reader StartAsync");
-        await _reader.StartAsync();
+        AppLog.Write($"Source.StartAsync({DisplayName}): reader started");
         Running = true;
         return true;
+    }
+
+    /// <summary>
+    /// Creates and starts a frame reader that produces a decoded color frame.
+    /// Requesting Bgra8 (rather than leaving the subtype unset) guarantees
+    /// <see cref="VideoMediaFrame.SoftwareBitmap"/> is non-null for cameras whose
+    /// native format is compressed (MJPG/H.264).
+    /// </summary>
+    private async Task<MediaFrameReader> StartReaderAsync(MediaFrameSource colorSource)
+    {
+        try
+        {
+            var r = await _capture!.CreateFrameReaderAsync(colorSource, MediaEncodingSubtypes.Bgra8);
+            await r.StartAsync();
+            AppLog.Write($"Source({DisplayName}): frame reader = Bgra8");
+            return r;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"Source({DisplayName}): Bgra8 reader failed ({ex.Message}); falling back to native");
+        }
+
+        var native = await _capture!.CreateFrameReaderAsync(colorSource);
+        await native.StartAsync();
+        AppLog.Write($"Source({DisplayName}): frame reader = native");
+        return native;
     }
 
     private void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
@@ -93,7 +121,13 @@ public sealed class CameraSource : IAsyncDisposable
         using var frame = sender.TryAcquireLatestFrame();
         var sw = frame?.VideoMediaFrame?.SoftwareBitmap;
         if (sw == null)
+        {
+            if ((Interlocked.Increment(ref _nullFrames) & 0x3F) == 1)
+                AppLog.Write($"Source({DisplayName}): null SoftwareBitmap x{_nullFrames}");
             return;
+        }
+        if (Interlocked.Exchange(ref _firstFrameLogged, 1) == 0)
+            AppLog.Write($"Source({DisplayName}): first frame {sw.PixelWidth}x{sw.PixelHeight} {sw.BitmapPixelFormat}");
 
         SoftwareBitmap? converted = null;
         if (sw.BitmapPixelFormat != BitmapPixelFormat.Bgra8)
