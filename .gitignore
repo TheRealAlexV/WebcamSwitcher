@@ -29,3 +29,6 @@ Thumbs.db
 Desktop.ini
 .vscode/
 .idea/
+
+# build tools
+tools/nuget.exe
