@@ -1,0 +1,8 @@
+=== WebcamSwitcher SmokeTest ===
+WebcamSwitcher_Start hr=0x00000000 handle=0x1DC00605090
+[pump] client connected
+Found device: SmokeTest Vcam (Windows Virtual Camera)
+FrameReader frame: 1920x1080 format=Nv12
+RESULT: OK (frame matches 1920x1080)
+=== DONE ===
+DONE 
