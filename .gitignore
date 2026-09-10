@@ -37,3 +37,4 @@ tools/nuget.exe
 **/*-result.txt
 **/launch-check*.txt
 **/run-launch-check*.bat
+**/result.txt

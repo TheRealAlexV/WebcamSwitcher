@@ -56,6 +56,9 @@ requires administrator rights once (to register the media source in `HKLM`).
   - `Ctrl+Alt+1` — camera 1
   - `Ctrl+Alt+2` — camera 2
   - `Ctrl+Alt+N` — rotate through all cameras
+- **Settings** (tray → Settings, or the Settings button) edits everything:
+  cameras (add/remove any number), output resolution & FPS, hotkeys, and startup
+  options — all applied without restarting the app.
 - The virtual camera appears in other apps as
   **"WebcamSwitcher Virtual Camera (Windows Virtual Camera)"**.
 
@@ -73,9 +76,9 @@ requires administrator rights once (to register the media source in `HKLM`).
 
 ## Configuration
 
-Settings are stored in
-`%APPDATA%\WebcamSwitcher\config.json` and are editable from the Settings window
-(hotkeys) or directly (camera assignment):
+All settings are editable from the **Settings** window (tray → Settings, or the
+Settings button in the main window) and apply **without restarting the app**.
+They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
 
 ```jsonc
 {
@@ -88,16 +91,27 @@ Settings are stored in
   ],
   "ActiveIndex": 0,
   "Hotkeys": [ "Ctrl+Alt+1", "Ctrl+Alt+2" ],
-  "RotateHotkey": "Ctrl+Alt+N"
+  "RotateHotkey": "Ctrl+Alt+N",
+  "StartWithWindows": false,
+  "StartMinimized": false
 }
 ```
 
-- `Cameras` — the two (or more) cameras to capture. `DeviceId` is the stable
-  device ID; if left empty, the first two physical cameras are used
+- `Cameras` — the cameras to capture (any number). `DeviceId` is the stable
+  device ID; if the list is empty, the first two physical cameras are used
   automatically.
+- `Width` / `Height` / `Fps` — the virtual camera's output format (default
+  1920x1080 @ 30fps). The active camera is scaled to this.
 - `Hotkeys` — one per camera, in order. Format: `Modifier+Modifier+Key`
   (e.g. `Ctrl+Alt+1`, `Ctrl+Shift+F2`, `Alt+N`).
-- `RotateHotkey` — single key that cycles through all cameras.
+- `RotateHotkey` — a single key that cycles through all cameras.
+- `StartWithWindows` — add/remove the app from the per-user startup (Run key).
+- `StartMinimized` — start hidden to the tray.
+
+> The output format is also written to
+> `%ProgramData%\WebcamSwitcher\format.ini` so the native virtual-camera source
+> advertises it. A consuming app may need to re-open the camera to pick up a new
+> resolution.
 
 ## Building
 
