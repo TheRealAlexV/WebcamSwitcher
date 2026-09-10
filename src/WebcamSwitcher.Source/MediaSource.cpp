@@ -24,7 +24,7 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 	DWORD streamId = 0;
 	wil::com_ptr_nothrow<IMFSensorProfile> profile;
 	RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_Legacy, 0, nullptr, &profile));
-	RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT<=30,1;SUT==))"));
+	RETURN_IF_FAILED(profile->AddProfileFilter(streamId, L"((RES==;FRT<=60,1;SUT==))"));
 	RETURN_IF_FAILED(collection->AddProfile(profile.get()));
 
 	RETURN_IF_FAILED(MFCreateSensorProfile(KSCAMERAPROFILE_HighFrameRate, 0, nullptr, &profile));

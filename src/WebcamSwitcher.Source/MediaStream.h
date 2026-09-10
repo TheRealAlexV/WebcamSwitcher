@@ -30,6 +30,10 @@ public:
 		_index(0),
 		_state(MF_STREAM_STATE_STOPPED),
 		_format(GUID_NULL),
+		_width(0),
+		_height(0),
+		_fpsNum(0),
+		_fpsDen(1),
 		_client(nullptr)
 	{
 		SetBaseAttributesTraceName(L"MediaStreamAtts");
@@ -52,6 +56,10 @@ private:
 	winrt::slim_mutex  _lock;
 	MF_STREAM_STATE _state;
 	GUID _format;
+	UINT32 _width;
+	UINT32 _height;
+	UINT32 _fpsNum;
+	UINT32 _fpsDen;
 	wil::com_ptr_nothrow<IMFStreamDescriptor> _descriptor;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFMediaSource> _source;

@@ -3,12 +3,13 @@ using WebcamSwitcher.Core;
 
 namespace WebcamSwitcher.App;
 
+/// <summary>Registers global hotkeys and re-registers them on config changes.</summary>
 public sealed class HotkeyService : IDisposable
 {
     private const int WM_HOTKEY = 0x0312;
 
     private HwndSource? _source;
-    private readonly AppConfig _config;
+    private AppConfig _config;
     private readonly CameraEngine _engine;
     private readonly Dictionary<int, int> _idToCamera = new();
     private int _rotateId = -1;
@@ -24,6 +25,8 @@ public sealed class HotkeyService : IDisposable
 
     public void Register()
     {
+        Unregister();
+
         var p = new HwndSourceParameters("WebcamSwitcherHotkeys")
         {
             Width = 0, Height = 0, PositionX = 0, PositionY = 0,
@@ -31,6 +34,10 @@ public sealed class HotkeyService : IDisposable
         };
         _source = new HwndSource(p);
         _source.AddHook(WndProc);
+
+        _idToCamera.Clear();
+        _rotateId = -1;
+        _nextId = 1;
 
         var hotkeys = _config.Hotkeys ?? Array.Empty<string>();
         for (int i = 0; i < hotkeys.Length && i < _config.Cameras.Count; i++)
@@ -43,6 +50,12 @@ public sealed class HotkeyService : IDisposable
         var rotate = Hotkey.Parse(_config.RotateHotkey);
         if (rotate != null && NativeInterop.RegisterHotKey(_source.Handle, _nextId, rotate.Modifiers, rotate.Vk))
             _rotateId = _nextId++;
+    }
+
+    public void Reload(AppConfig config)
+    {
+        _config = config;
+        Register();
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -73,7 +86,7 @@ public sealed class HotkeyService : IDisposable
         Rotated?.Invoke();
     }
 
-    public void Dispose()
+    private void Unregister()
     {
         if (_source != null)
         {
@@ -85,5 +98,9 @@ public sealed class HotkeyService : IDisposable
             _source.Dispose();
             _source = null;
         }
+        _idToCamera.Clear();
+        _rotateId = -1;
     }
+
+    public void Dispose() => Unregister();
 }

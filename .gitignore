@@ -32,3 +32,8 @@ Desktop.ini
 
 # build tools
 tools/nuget.exe
+
+# test/dev harness outputs
+**/*-result.txt
+**/launch-check*.txt
+**/run-launch-check*.bat

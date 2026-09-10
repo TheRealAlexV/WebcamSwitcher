@@ -4,6 +4,7 @@
 #include "EnumNames.h"
 #include "MFTools.h"
 #include "PipeFrameClient.h"
+#include "SourceFormat.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
 #include "WebcamSwitcherProtocol.h"
@@ -21,17 +22,24 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 
-	// Advertise a single fixed NV12 media type.
+	// Read the configured output format (persisted by the app) and advertise it.
+	auto fmt = ReadSourceFormat();
+	_width = fmt.width;
+	_height = fmt.height;
+	_fpsNum = fmt.fpsNum;
+	_fpsDen = fmt.fpsDen;
+
+	// Advertise a single NV12 media type at the configured size/fps.
 	wil::com_ptr_nothrow<IMFMediaType> nv12Type;
 	RETURN_IF_FAILED(MFCreateMediaType(&nv12Type));
 	nv12Type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
 	nv12Type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
 	nv12Type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
 	nv12Type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-	MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, WS_DEFAULT_WIDTH, WS_DEFAULT_HEIGHT);
-	nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, WS_DEFAULT_WIDTH);
-	MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, WS_DEFAULT_FPS_NUM, WS_DEFAULT_FPS_DEN);
-	UINT64 bitrate = (UINT64)WS_DEFAULT_WIDTH * WS_DEFAULT_HEIGHT * 3 / 2 * 8 * WS_DEFAULT_FPS_NUM / WS_DEFAULT_FPS_DEN;
+	MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, _width, _height);
+	nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, _width);
+	MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, _fpsNum, _fpsDen);
+	UINT64 bitrate = (UINT64)_width * _height * 3 / 2 * 8 * _fpsNum / _fpsDen;
 	nv12Type->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)bitrate);
 	MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
@@ -150,8 +158,8 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 
-	const DWORD width = WS_DEFAULT_WIDTH;
-	const DWORD height = WS_DEFAULT_HEIGHT;
+	const DWORD width = _width;
+	const DWORD height = _height;
 	const DWORD ySize = width * height;
 	const DWORD nv12Size = ySize + ySize / 2;
 

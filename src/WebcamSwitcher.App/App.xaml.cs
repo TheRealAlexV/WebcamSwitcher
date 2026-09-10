@@ -8,11 +8,9 @@ namespace WebcamSwitcher.App;
 
 public partial class App : Application
 {
-    private VirtualCameraService? _vcam;
-    private FramePublisher? _publisher;
-    private CameraEngine? _engine;
-    private HotkeyService? _hotkeys;
+    private PipelineController? _pipeline;
     private NotifyIcon? _tray;
+    private ToolStripMenuItem[]? _trayCameraItems;
     private MainWindow? _mainWindow;
     private AppConfig _config = new();
 
@@ -41,25 +39,31 @@ public partial class App : Application
             }
         }
 
-        // Compose services.
-        _vcam = new VirtualCameraService();
-        bool vcamOk = _vcam.Start();
-
-        _publisher = new FramePublisher(_config.Width, _config.Height, _config.Fps);
-        _engine = new CameraEngine(_publisher);
-
-        int started = 0;
-        try { started = await _engine.StartAsync(_config); }
-        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Engine start failed: {ex}"); }
-
-        _hotkeys = new HotkeyService(_config, _engine);
-        _hotkeys.Register();
+        _pipeline = new PipelineController();
+        try { await _pipeline.StartAsync(_config); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"Pipeline start failed: {ex}"); }
+        _pipeline.SourcesChanged += OnSourcesChanged;
 
         CreateTray();
 
-        _mainWindow = new MainWindow(_engine, _config, vcamOk);
-        _mainWindow.Closed += (_, _) => _mainWindow = null;
+        if (!_config.StartMinimized)
+            ShowMain();
+    }
+
+    private void OnSourcesChanged()
+    {
+        Dispatcher.BeginInvoke(RebuildTrayMenu);
+    }
+
+    private void ShowMain()
+    {
+        if (_mainWindow == null)
+        {
+            _mainWindow = new MainWindow(_pipeline!);
+            _mainWindow.Closed += (_, _) => _mainWindow = null;
+        }
         _mainWindow.Show();
+        _mainWindow.Activate();
     }
 
     private void CreateTray()
@@ -70,45 +74,61 @@ public partial class App : Application
             Text = "WebcamSwitcher",
             Visible = true
         };
+        _tray.DoubleClick += (_, _) => ShowMain();
 
         var menu = new ContextMenuStrip();
         _tray.ContextMenuStrip = menu;
 
-        // Keep a reference to update the checked state.
-        var items = new ToolStripMenuItem[_engine!.Sources.Count];
-        for (int i = 0; i < items.Length; i++)
+        RebuildTrayMenu();
+
+        menu.Opening += (_, _) => UpdateTrayChecks();
+    }
+
+    private void RebuildTrayMenu()
+    {
+        if (_tray?.ContextMenuStrip == null)
+            return;
+
+        var menu = _tray.ContextMenuStrip;
+        menu.Items.Clear();
+
+        var sources = _pipeline?.Sources ?? Array.Empty<CameraSource>();
+        _trayCameraItems = new ToolStripMenuItem[sources.Count];
+        for (int i = 0; i < sources.Count; i++)
         {
             int idx = i;
-            var name = _engine.Sources[i].DisplayName;
-            var item = new ToolStripMenuItem(name, null, (_, _) => { _engine.ActiveIndex = idx; });
-            items[i] = item;
+            var item = new ToolStripMenuItem(sources[i].DisplayName, null, (_, _) => { if (_pipeline != null) _pipeline.ActiveIndex = idx; });
+            _trayCameraItems[i] = item;
             menu.Items.Add(item);
         }
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Settings", null, (_, _) => OpenSettings());
         menu.Items.Add("Exit", null, (_, _) => Shutdown());
+    }
 
-        _tray.DoubleClick += (_, _) => OpenSettings();
-        menu.Opening += (_, _) =>
-        {
-            for (int i = 0; i < items.Length && i < _engine.Sources.Count; i++)
-                items[i].Checked = _engine.ActiveIndex == i;
-        };
+    private void UpdateTrayChecks()
+    {
+        if (_trayCameraItems == null || _pipeline == null)
+            return;
+        for (int i = 0; i < _trayCameraItems.Length; i++)
+            _trayCameraItems[i].Checked = _pipeline.ActiveIndex == i;
     }
 
     private void OpenSettings()
     {
-        _mainWindow?.Show();
-        _mainWindow?.Activate();
+        ShowMain();
+        if (_pipeline != null)
+            new SettingsWindow(_pipeline) { Owner = _mainWindow }.ShowDialog();
     }
 
-    protected override void OnExit(ExitEventArgs e)
+    protected override async void OnExit(ExitEventArgs e)
     {
-        _hotkeys?.Dispose();
         _tray?.Dispose();
-        try { _engine?.DisposeAsync().AsTask().Wait(3000); } catch { }
-        _vcam?.Dispose();
+        if (_pipeline != null)
+        {
+            try { await _pipeline.DisposeAsync(); } catch { }
+        }
         ConfigService.Save(_config);
         base.OnExit(e);
     }
