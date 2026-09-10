@@ -92,6 +92,7 @@ public sealed class CameraEngine : IAsyncDisposable
         foreach (var s in _sources)
             await s.DisposeAsync();
         _sources.Clear();
-        _publisher.Dispose();
+        // Note: the publisher is owned by the caller (PipelineController), not
+        // this engine, so it is not disposed here.
     }
 }

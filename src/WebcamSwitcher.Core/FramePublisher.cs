@@ -24,6 +24,7 @@ public sealed class FramePublisher : IDisposable
     private readonly IntPtr _securityDescriptor;
     private CancellationTokenSource _cts = new();
     private Task? _acceptTask;
+    private int _disposed;
 
     public FramePublisher(int width, int height, int fps)
     {
@@ -150,6 +151,9 @@ public sealed class FramePublisher : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
         _cts.Cancel();
         try { _acceptTask?.Wait(1000); } catch { }
         lock (_lock)

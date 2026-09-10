@@ -86,8 +86,9 @@ public sealed class PipelineController : IAsyncDisposable
             await _engine.DisposeAsync();
             _engine = null;
         }
-        _publisher?.Dispose();
+        var oldPublisher = _publisher;
         _publisher = null;
+        oldPublisher?.Dispose();
 
         _publisher = new FramePublisher(_config.Width, _config.Height, _config.Fps);
         var engine = new CameraEngine(_publisher);
@@ -158,8 +159,9 @@ public sealed class PipelineController : IAsyncDisposable
             await _engine.DisposeAsync();
             _engine = null;
         }
-        _publisher?.Dispose();
+        var oldPublisher = _publisher;
         _publisher = null;
+        oldPublisher?.Dispose();
         _vcam.Dispose();
     }
 }

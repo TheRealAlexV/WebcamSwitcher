@@ -152,10 +152,7 @@ public partial class SettingsWindow : Window
             {
                 Width = 220,
                 ItemsSource = devices,
-                DisplayMemberPath = nameof(CameraConfig.FriendlyName),
-                Background = new SolidColorBrush(Color.FromRgb(0x2A, 0x2A, 0x2A)),
-                Foreground = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44))
+                DisplayMemberPath = nameof(CameraConfig.FriendlyName)
             };
             if (selected != null)
                 Combo.SelectedItem = devices.FirstOrDefault(d => d.DeviceId == selected.DeviceId) ?? selected;
@@ -163,10 +160,7 @@ public partial class SettingsWindow : Window
             HotkeyBox = new TextBox
             {
                 Width = 110,
-                Text = hotkey,
-                Background = new SolidColorBrush(Color.FromRgb(0x2A, 0x2A, 0x2A)),
-                Foreground = Brushes.White,
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0x44, 0x44, 0x44))
+                Text = hotkey
             };
 
             var removeBtn = new Button

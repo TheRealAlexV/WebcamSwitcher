@@ -87,6 +87,7 @@ try
     Console.WriteLine(f1 is { w: 1920 } && f2 is { w: 1920 } ? "RESULT: OK" : "RESULT: FAIL");
 
     await engine.DisposeAsync();
+    publisher.Dispose();
 }
 catch (Exception ex)
 {

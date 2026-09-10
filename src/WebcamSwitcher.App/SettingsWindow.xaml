@@ -15,20 +15,20 @@
             <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
                 <StackPanel Margin="0,0,16,0">
                     <TextBlock Text="Width" Foreground="#CCC"/>
-                    <ComboBox x:Name="WidthCombo" Width="110" IsEditable="True" Background="#2A2A2A" Foreground="White" BorderBrush="#444"/>
+                    <ComboBox x:Name="WidthCombo" Width="110" IsEditable="True"/>
                 </StackPanel>
                 <StackPanel Margin="0,0,16,0">
                     <TextBlock Text="Height" Foreground="#CCC"/>
-                    <ComboBox x:Name="HeightCombo" Width="110" IsEditable="True" Background="#2A2A2A" Foreground="White" BorderBrush="#444"/>
+                    <ComboBox x:Name="HeightCombo" Width="110" IsEditable="True"/>
                 </StackPanel>
                 <StackPanel>
                     <TextBlock Text="FPS" Foreground="#CCC"/>
-                    <ComboBox x:Name="FpsCombo" Width="90" IsEditable="True" Background="#2A2A2A" Foreground="White" BorderBrush="#444"/>
+                    <ComboBox x:Name="FpsCombo" Width="90" IsEditable="True"/>
                 </StackPanel>
             </StackPanel>
 
             <TextBlock Text="Rotate hotkey" Foreground="#CCC" Margin="0,0,0,6"/>
-            <TextBox x:Name="RotateHotkeyBox" Width="130" HorizontalAlignment="Left" Background="#2A2A2A" Foreground="White" BorderBrush="#444" Margin="0,0,0,16"/>
+            <TextBox x:Name="RotateHotkeyBox" Width="130" HorizontalAlignment="Left" Margin="0,0,0,16"/>
 
             <Separator Margin="0,4"/>
 
