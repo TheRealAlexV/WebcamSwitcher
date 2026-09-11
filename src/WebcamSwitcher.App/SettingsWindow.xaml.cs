@@ -101,7 +101,14 @@ public partial class SettingsWindow : Window
                 MessageBox.Show(this, $"Invalid hotkey '{row.HotkeyBox.Text}'. Use e.g. 'Ctrl+Alt+1'.", "Invalid hotkey", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-            cameras.Add(sel);
+            var (cw, ch) = row.SelectedCapture;
+            cameras.Add(new CameraConfig
+            {
+                DeviceId = sel.DeviceId,
+                FriendlyName = sel.FriendlyName,
+                CaptureWidth = cw,
+                CaptureHeight = ch
+            });
             hotkeys.Add(row.HotkeyBox.Text);
         }
 
@@ -142,9 +149,31 @@ public partial class SettingsWindow : Window
     {
         public Panel Panel { get; }
         public ComboBox Combo { get; }
+        public ComboBox CaptureCombo { get; }
         public TextBox HotkeyBox { get; }
 
+        private static readonly string[] CaptureSizes =
+        {
+            "Auto", "1920x1080", "1280x720", "1024x576", "960x720", "800x600", "640x480", "640x360"
+        };
+
         public CameraConfig? SelectedCamera => Combo.SelectedItem as CameraConfig;
+
+        /// <summary>Chosen capture size, or (null, null) for "Auto".</summary>
+        public (int? W, int? H) SelectedCapture
+        {
+            get
+            {
+                var s = CaptureCombo.Text?.Trim();
+                if (!string.IsNullOrEmpty(s) && !s.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+                {
+                    var p = s.Split('x');
+                    if (p.Length == 2 && int.TryParse(p[0], out int cw) && int.TryParse(p[1], out int ch))
+                        return (cw, ch);
+                }
+                return (null, null);
+            }
+        }
 
         public CameraRow(List<CameraConfig> devices, CameraConfig? selected, string hotkey, Action<CameraRow> remove, int index)
         {
@@ -168,6 +197,15 @@ public partial class SettingsWindow : Window
                 Text = hotkey
             };
 
+            CaptureCombo = new ComboBox
+            {
+                Width = 104,
+                IsEditable = true,
+                ItemsSource = CaptureSizes,
+                Text = selected?.CaptureWidth is int sw && selected.CaptureHeight is int sh ? $"{sw}x{sh}" : "Auto",
+                ToolTip = "Capture resolution. Auto matches the output aspect (avoids black bars)."
+            };
+
             var removeBtn = new Button
             {
                 Content = "Remove",
@@ -185,8 +223,18 @@ public partial class SettingsWindow : Window
                 Margin = new Thickness(8, 0, 6, 0)
             };
 
+            var capLabel = new TextBlock
+            {
+                Text = "Capture",
+                Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 6, 0)
+            };
+
             Panel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
             Panel.Children.Add(Combo);
+            Panel.Children.Add(capLabel);
+            Panel.Children.Add(CaptureCombo);
             Panel.Children.Add(label);
             Panel.Children.Add(HotkeyBox);
             Panel.Children.Add(removeBtn);

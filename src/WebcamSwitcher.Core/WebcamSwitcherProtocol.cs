@@ -6,6 +6,10 @@ namespace WebcamSwitcher.Core;
 public static class Protocol
 {
     public const string PipeName = @"\\.\pipe\WebcamSwitcher.Frames.v1";
+
+    /// <summary>Pipe for the continuous passthrough feed of camera slot <paramref name="slot"/>.</summary>
+    public static string PassthroughPipeName(int slot) => PipeName + ".p" + slot;
+
     public const uint Magic = 0x57564353u;
     public const ushort Version = 1;
 

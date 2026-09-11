@@ -12,7 +12,8 @@ public sealed class PipelineController : IAsyncDisposable
 {
     private AppConfig _config = new();
     private readonly VirtualCameraService _vcam = new();
-    private FramePublisher? _publisher;
+    private readonly List<FramePublisher> _publishers = new();
+    private FramePublisher? _switcher;
     private CameraEngine? _engine;
     private HotkeyService? _hotkeys;
     private bool _vcamOk;
@@ -47,11 +48,19 @@ public sealed class PipelineController : IAsyncDisposable
         SourceFormatFile.Write(_config.Width, _config.Height, _config.Fps);
         ApplyStartWithWindows(_config.StartWithWindows);
 
-        // The virtual camera starts disabled unless the user opted in.
+        // The virtual camera starts disabled unless the user opted in. The native
+        // registration is slow, so run it off the UI thread (RebuildHotkeys below
+        // must stay on the UI thread).
         if (_config.VirtualCameraOnLaunch)
-            _vcamOk = _vcam.Start();
+            _vcamOk = await Task.Run(() => _vcam.Start(_config.Cameras));
         await RebuildPipelineAsync();
         RebuildHotkeys();
+
+        // Initial start populates sources/vcam/capture after the UI may already
+        // be visible (the window is shown eagerly during startup), so notify.
+        SourcesChanged?.Invoke();
+        CaptureStateChanged?.Invoke();
+        VirtualCameraStateChanged?.Invoke();
     }
 
     public async Task ApplyAsync(AppConfig next)
@@ -88,7 +97,7 @@ public sealed class PipelineController : IAsyncDisposable
                 AppLog.Write("ApplyAsync: vcam Stop begin");
                 _vcam.Stop();
                 AppLog.Write("ApplyAsync: vcam Stop done");
-                _vcamOk = _vcam.Start();
+                _vcamOk = _vcam.Start(_config.Cameras);
                 AppLog.Write("ApplyAsync: vcam Start done");
             });
             AppLog.Write("ApplyAsync: vcam restarted");
@@ -110,7 +119,7 @@ public sealed class PipelineController : IAsyncDisposable
     {
         if (_vcamOk)
             return;
-        _vcamOk = _vcam.Start();
+        _vcamOk = _vcam.Start(_config.Cameras);
         AppLog.Write($"StartVirtualCamera: {(_vcamOk ? "ok" : "failed")}");
         VirtualCameraStateChanged?.Invoke();
     }
@@ -148,9 +157,7 @@ public sealed class PipelineController : IAsyncDisposable
                 await _engine.DisposeAsync();
                 _engine = null;
             }
-            var p = _publisher;
-            _publisher = null;
-            p?.Dispose();
+            DisposePublishers();
         });
         RebuildHotkeys();
         SourcesChanged?.Invoke();
@@ -173,18 +180,32 @@ public sealed class PipelineController : IAsyncDisposable
             AppLog.Write("Rebuild: dispose engine end");
             _engine = null;
         }
-        var oldPublisher = _publisher;
-        _publisher = null;
-        AppLog.Write("Rebuild: dispose publisher begin");
-        oldPublisher?.Dispose();
-        AppLog.Write("Rebuild: dispose publisher end");
+        AppLog.Write("Rebuild: dispose publishers begin");
+        DisposePublishers();
+        AppLog.Write("Rebuild: dispose publishers end");
 
-        _publisher = new FramePublisher(_config.Width, _config.Height, _config.Fps);
-        var engine = new CameraEngine(_publisher);
+        // One passthrough publisher per camera slot plus the switcher publisher.
+        int w = _config.Width, h = _config.Height, fps = _config.Fps;
+        for (int i = 0; i < _config.Cameras.Count; i++)
+            _publishers.Add(new FramePublisher(Protocol.PassthroughPipeName(i), w, h, fps));
+        _switcher = new FramePublisher(Protocol.PipeName, w, h, fps);
+
+        var engine = new CameraEngine(_publishers, _switcher);
         AppLog.Write("Rebuild: engine StartAsync begin");
         await engine.StartAsync(_config);
         AppLog.Write("Rebuild: engine StartAsync end");
         _engine = engine;
+    }
+
+    private void DisposePublishers()
+    {
+        foreach (var p in _publishers)
+        {
+            try { p.Dispose(); } catch { }
+        }
+        _publishers.Clear();
+        try { _switcher?.Dispose(); } catch { }
+        _switcher = null;
     }
 
     private void RebuildHotkeys()
@@ -241,8 +262,17 @@ public sealed class PipelineController : IAsyncDisposable
         }
     }
 
+    /// <summary>Disposes UI-affine hotkey resources. Must be called on the UI thread.</summary>
+    public void DisposeHotkeys()
+    {
+        _hotkeys?.Dispose();
+        _hotkeys = null;
+    }
+
     public async ValueTask DisposeAsync()
     {
+        // Hotkeys are UI-affine; the caller (OnExit) disposes them on the UI
+        // thread via DisposeHotkeys() first. This is a fallback for other paths.
         _hotkeys?.Dispose();
         _hotkeys = null;
         if (_engine != null)
@@ -250,9 +280,7 @@ public sealed class PipelineController : IAsyncDisposable
             await _engine.DisposeAsync();
             _engine = null;
         }
-        var oldPublisher = _publisher;
-        _publisher = null;
-        oldPublisher?.Dispose();
+        DisposePublishers();
         _vcam.Dispose();
     }
 }

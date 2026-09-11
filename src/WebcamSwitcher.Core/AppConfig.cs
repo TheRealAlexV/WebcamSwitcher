@@ -4,6 +4,14 @@ public class CameraConfig
 {
     public string? DeviceId { get; set; }
     public string FriendlyName { get; set; } = "";
+
+    /// <summary>
+    /// Optional per-camera capture size. When null, the closest supported format
+    /// whose aspect matches the global output is chosen automatically (which keeps
+    /// e.g. a 4:3 webcam from being pillarboxed into a 16:9 canvas).
+    /// </summary>
+    public int? CaptureWidth { get; set; }
+    public int? CaptureHeight { get; set; }
 }
 
 public class AppConfig

@@ -34,6 +34,7 @@ public:
 		_height(0),
 		_fpsNum(0),
 		_fpsDen(1),
+		_nextSampleTime(0),
 		_client(nullptr)
 	{
 		SetBaseAttributesTraceName(L"MediaStreamAtts");
@@ -60,6 +61,7 @@ private:
 	UINT32 _height;
 	UINT32 _fpsNum;
 	UINT32 _fpsDen;
+	LONGLONG _nextSampleTime;
 	wil::com_ptr_nothrow<IMFStreamDescriptor> _descriptor;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFMediaSource> _source;

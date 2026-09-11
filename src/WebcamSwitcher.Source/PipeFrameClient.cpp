@@ -55,13 +55,13 @@ void PipeFrameClient::Run()
 {
 	while (_running)
 	{
-		if (!WaitNamedPipeW(WS_PIPE_NAME, 3000))
+		if (!WaitNamedPipeW(_pipeName.c_str(), 3000))
 		{
 			Sleep(200);
 			continue;
 		}
 
-		HANDLE pipe = CreateFileW(WS_PIPE_NAME, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+		HANDLE pipe = CreateFileW(_pipeName.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
 		if (pipe == INVALID_HANDLE_VALUE)
 		{
 			Sleep(200);

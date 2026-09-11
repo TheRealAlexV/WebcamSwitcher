@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+#include <atomic>
 #include "PipeFrameClient.h"
 
 struct MediaStream;
@@ -52,6 +54,11 @@ public:
 
 	HRESULT Initialize(IMFAttributes* attributes);
 
+	// Maps the virtual camera's friendly name (set by the Frame Server at
+	// ActivateObject time) to its pipe via %ProgramData%\WebcamSwitcher\vcams.ini
+	// and starts the frame client. Idempotent; falls back to the switcher pipe.
+	HRESULT BindCamera(const std::wstring& friendlyName);
+
 private:
 #if _DEBUG
 	int32_t query_interface_tearoff(winrt::guid const& id, void** object) const noexcept override
@@ -81,4 +88,5 @@ private:
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFPresentationDescriptor> _descriptor;
 	PipeFrameClient _client;
+	std::atomic<bool> _cameraBound{ false };
 };

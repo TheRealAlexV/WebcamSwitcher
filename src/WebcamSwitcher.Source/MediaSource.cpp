@@ -14,9 +14,9 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 		RETURN_IF_FAILED(attributes->CopyAllItems(this));
 	}
 
-	// Start the frame client so it connects to the app's pipe as soon as the
-	// source is activated (even before the consumer starts the stream).
-	RETURN_IF_FAILED(_client.Start());
+	// NOTE: the frame client is NOT started here. The per-instance friendly
+	// name that selects the pipe is only set by the Frame Server at
+	// ActivateObject time, so BindCamera() starts it there (see Activator.cpp).
 
 	wil::com_ptr_nothrow<IMFSensorProfileCollection> collection;
 	RETURN_IF_FAILED(MFCreateSensorProfileCollection(&collection));
@@ -55,6 +55,151 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 	RETURN_IF_FAILED(MFCreatePresentationDescriptor((DWORD)streams.size(), streams.get(), &_descriptor));
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 	return S_OK;
+}
+
+// ---------------------------------------------------------------------------
+// vcams.ini lookup: %ProgramData%\WebcamSwitcher\vcams.ini, UTF-8 (no BOM),
+// one "<friendlyName><TAB><pipeName>" mapping per line. Blank lines and lines
+// starting with '#' are ignored; friendlyName matching is exact and ordinal
+// case-insensitive.
+// ---------------------------------------------------------------------------
+namespace
+{
+	std::wstring GetVcamsIniPath()
+	{
+		// Query the required size (includes the terminating null), then read.
+		DWORD len = GetEnvironmentVariableW(L"ProgramData", nullptr, 0);
+		if (len == 0)
+			return {};
+
+		std::wstring dir(len, L'\0');
+		DWORD got = GetEnvironmentVariableW(L"ProgramData", dir.data(), (DWORD)dir.size());
+		if (got == 0 || got >= dir.size())
+			return {};
+
+		dir.resize(got);
+		return dir + L"\\WebcamSwitcher\\vcams.ini";
+	}
+
+	bool ReadFileBytes(const std::wstring& path, std::string& out)
+	{
+		if (path.empty())
+			return false;
+
+		HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (h == INVALID_HANDLE_VALUE)
+			return false;
+
+		LARGE_INTEGER size{};
+		if (!GetFileSizeEx(h, &size) || size.QuadPart < 0 || size.QuadPart > (16LL * 1024 * 1024))
+		{
+			CloseHandle(h);
+			return false;
+		}
+
+		out.resize(static_cast<size_t>(size.QuadPart));
+		size_t total = 0;
+		bool ok = true;
+		while (total < out.size())
+		{
+			DWORD got = 0;
+			if (!ReadFile(h, out.data() + total, static_cast<DWORD>(out.size() - total), &got, nullptr) || got == 0)
+			{
+				ok = false;
+				break;
+			}
+			total += got;
+		}
+		CloseHandle(h);
+		return ok;
+	}
+
+	bool ResolvePipeNameFromIni(const std::wstring& friendlyName, std::wstring& pipeName)
+	{
+		if (friendlyName.empty())
+			return false;
+
+		std::string bytes;
+		if (!ReadFileBytes(GetVcamsIniPath(), bytes))
+			return false;
+
+		int wideLen = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+		if (wideLen <= 0)
+			return false;
+
+		std::wstring text(static_cast<size_t>(wideLen), L'\0');
+		MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), text.data(), wideLen);
+
+		size_t pos = 0;
+		while (pos < text.size())
+		{
+			size_t end = text.find(L'\n', pos);
+			std::wstring line = text.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
+			pos = (end == std::wstring::npos) ? text.size() : end + 1;
+
+			// Trim trailing CR / whitespace.
+			while (!line.empty() && (line.back() == L'\r' || line.back() == L' ' || line.back() == L'\t'))
+				line.pop_back();
+
+			if (line.empty() || line[0] == L'#')
+				continue;
+
+			size_t tab = line.find(L'\t');
+			if (tab == std::wstring::npos)
+				continue;
+
+			std::wstring key = line.substr(0, tab);
+			std::wstring value = line.substr(tab + 1);
+			while (!value.empty() && (value.back() == L'\r' || value.back() == L' ' || value.back() == L'\t'))
+				value.pop_back();
+
+			if (value.empty())
+				continue;
+
+			if (CompareStringOrdinal(key.c_str(), static_cast<int>(key.size()),
+				friendlyName.c_str(), static_cast<int>(friendlyName.size()), TRUE) == CSTR_EQUAL)
+			{
+				pipeName = value;
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
+HRESULT MediaSource::BindCamera(const std::wstring& friendlyName)
+{
+	// Idempotent: only the first call selects the pipe and starts the client.
+	bool expected = false;
+	if (!_cameraBound.compare_exchange_strong(expected, true))
+		return S_OK;
+
+	// Retry briefly: the app writes vcams.ini just before starting the vcams,
+	// so on a cold activation the file may not be visible yet.
+	const int attempts = 10;
+	std::wstring pipeName;
+	bool resolved = false;
+	if (!friendlyName.empty())
+	{
+		for (int attempt = 0; attempt < attempts && !resolved; attempt++)
+		{
+			resolved = ResolvePipeNameFromIni(friendlyName, pipeName);
+			if (!resolved && attempt + 1 < attempts)
+				Sleep(200);
+		}
+	}
+
+	if (!resolved)
+	{
+		WINTRACE(L"MediaSource::BindCamera friendly name '%s' unresolved after retries; falling back to '%s'",
+			friendlyName.c_str(), WS_PIPE_NAME);
+		pipeName = WS_PIPE_NAME;
+	}
+
+	WINTRACE(L"MediaSource::BindCamera '%s' -> '%s'", friendlyName.c_str(), pipeName.c_str());
+	_client.SetPipeName(pipeName);
+	return _client.Start();
 }
 
 int MediaSource::GetStreamIndexById(DWORD id)

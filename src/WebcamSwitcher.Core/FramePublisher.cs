@@ -20,14 +20,22 @@ public sealed class FramePublisher : IDisposable
 
     private readonly object _lock = new();
     private readonly List<IntPtr> _clients = new();
+    private readonly string _pipeName;
     private readonly byte[] _configMsg;
     private readonly IntPtr _securityDescriptor;
+    private readonly AutoResetEvent _frameSignal = new(false);
     private CancellationTokenSource _cts = new();
     private Task? _acceptTask;
+    private Task? _writerTask;
+    private byte[] _pending = Array.Empty<byte>();
+    private byte[] _writeBuf = Array.Empty<byte>();
+    private long _publishCount;
+    private long _startTicks;
     private int _disposed;
 
-    public FramePublisher(int width, int height, int fps)
+    public FramePublisher(string pipeName, int width, int height, int fps)
     {
+        _pipeName = pipeName;
         var config = new WsConfigMsg
         {
             Width = (uint)width,
@@ -43,28 +51,83 @@ public sealed class FramePublisher : IDisposable
             _securityDescriptor = IntPtr.Zero;
     }
 
-    public void Start() => _acceptTask = Task.Run(AcceptLoop);
+    public void Start()
+    {
+        _startTicks = DateTime.UtcNow.Ticks;
+        _acceptTask = Task.Run(AcceptLoop);
+        _writerTask = Task.Run(WriterLoop);
+    }
 
-    /// <summary>Writes the latest NV12 frame to every connected client.</summary>
+    /// <summary>Queues the latest NV12 frame for delivery to every connected client.</summary>
     public void PublishFrame(byte[] nv12, WsFrameInfo info)
     {
-        byte[] header = BuildMessage(Protocol.TypeFrame, StructToBytes(info));
+        byte[] infoBytes = StructToBytes(info);
+        byte[] header = StructToBytes(new WsMsgHeader
+        {
+            Magic = Protocol.Magic,
+            Version = Protocol.Version,
+            Type = Protocol.TypeFrame,
+            PayloadLen = (uint)(infoBytes.Length + nv12.Length)
+        });
+        int total = header.Length + infoBytes.Length + nv12.Length;
+
+        // Copy into a contiguous latest-frame slot; the writer thread performs the
+        // (possibly blocking) pipe writes so a slow consumer can't stall capture.
         lock (_lock)
         {
-            for (int i = _clients.Count - 1; i >= 0; i--)
+            if (_pending.Length != total)
+                _pending = new byte[total];
+            Buffer.BlockCopy(header, 0, _pending, 0, header.Length);
+            Buffer.BlockCopy(infoBytes, 0, _pending, header.Length, infoBytes.Length);
+            Buffer.BlockCopy(nv12, 0, _pending, header.Length + infoBytes.Length, nv12.Length);
+            _frameSignal.Set();
+        }
+        Interlocked.Increment(ref _publishCount);
+    }
+
+    private void WriterLoop()
+    {
+        while (!_cts.IsCancellationRequested)
+        {
+            if (!_frameSignal.WaitOne(500))
+                continue;
+
+            byte[] msg;
+            lock (_lock)
             {
-                var h = _clients[i];
-                if (!WriteAll(h, header) || !WriteAll(h, nv12))
+                if (_writeBuf.Length != _pending.Length)
+                    _writeBuf = new byte[_pending.Length];
+                Buffer.BlockCopy(_pending, 0, _writeBuf, 0, _pending.Length);
+                msg = _writeBuf;
+            }
+
+            IntPtr[] clients;
+            lock (_lock)
+                clients = _clients.ToArray();
+
+            foreach (var h in clients)
+            {
+                if (!WriteAll(h, msg))
                 {
-                    NativeInterop.DisconnectNamedPipe(h);
-                    NativeInterop.CloseHandle(h);
-                    _clients.RemoveAt(i);
+                    lock (_lock)
+                    {
+                        if (_clients.Contains(h))
+                        {
+                            NativeInterop.DisconnectNamedPipe(h);
+                            NativeInterop.CloseHandle(h);
+                            _clients.Remove(h);
+                            AppLog.Write($"FramePublisher: client write failed -> dropped (clients={_clients.Count})");
+                        }
+                    }
                 }
             }
         }
     }
 
     public int ClientCount { get { lock (_lock) return _clients.Count; } }
+
+    /// <summary>Total frames handed to this publisher. Monotonic; for diagnostics/tests.</summary>
+    public long PublishCount => Interlocked.Read(ref _publishCount);
 
     private unsafe void AcceptLoop()
     {
@@ -78,7 +141,7 @@ public sealed class FramePublisher : IDisposable
             };
 
             IntPtr pipe = NativeInterop.CreateNamedPipeW(
-                Protocol.PipeName,
+                _pipeName,
                 NativeInterop.PipeAccessDuplex,
                 NativeInterop.PipeTypeByte | NativeInterop.PipeReadmodeByte | NativeInterop.PipeWait,
                 NativeInterop.PipeUnlimitedInstances,
@@ -107,6 +170,7 @@ public sealed class FramePublisher : IDisposable
 
             lock (_lock)
                 _clients.Add(pipe);
+            AppLog.Write($"FramePublisher: client connected (clients={ClientCount})");
         }
     }
 
@@ -156,7 +220,14 @@ public sealed class FramePublisher : IDisposable
 
         _cts.Cancel();
         UnblockAccept();
+        _frameSignal.Set();
         try { _acceptTask?.Wait(2000); } catch { }
+        try { _writerTask?.Wait(2000); } catch { }
+
+        double secs = (DateTime.UtcNow.Ticks - _startTicks) / (double)TimeSpan.TicksPerSecond;
+        if (secs > 0)
+            AppLog.Write($"FramePublisher: published {_publishCount} frames over {secs:F1}s = {_publishCount / secs:F1} fps");
+
         lock (_lock)
         {
             foreach (var h in _clients)
@@ -174,13 +245,13 @@ public sealed class FramePublisher : IDisposable
     // Connects a throwaway client so a pending ConnectNamedPipe in AcceptLoop returns
     // and the loop can observe cancellation and exit (otherwise it would block forever
     // and leak a pipe instance + thread across rebuilds).
-    private static void UnblockAccept()
+    private void UnblockAccept()
     {
         for (int i = 0; i < 3; i++)
         {
             try
             {
-                IntPtr h = NativeInterop.CreateFileW(Protocol.PipeName, NativeInterop.GenericRead, NativeInterop.FileShareRead | NativeInterop.FileShareWrite, IntPtr.Zero, NativeInterop.OpenExisting, 0, IntPtr.Zero);
+                IntPtr h = NativeInterop.CreateFileW(_pipeName, NativeInterop.GenericRead, NativeInterop.FileShareRead | NativeInterop.FileShareWrite, IntPtr.Zero, NativeInterop.OpenExisting, 0, IntPtr.Zero);
                 if (h != (IntPtr)(-1))
                 {
                     NativeInterop.CloseHandle(h);

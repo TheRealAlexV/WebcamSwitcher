@@ -64,6 +64,11 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 		WINTRACE(L"MediaStream::Start format: %s", GUID_ToStringW(_format).c_str());
 	}
 
+	{
+		winrt::slim_lock_guard lock(_lock);
+		_nextSampleTime = MFGetSystemTime();
+	}
+
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_RUNNING;
 	return S_OK;
@@ -172,11 +177,9 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	DWORD curLen = 0;
 	RETURN_IF_FAILED(buffer->Lock(&data, &maxLen, &curLen));
 
-	// Fill with legal limited-range NV12 black (Y=16, U=V=128). All-zero NV12
-	// decodes as GREEN under BT.601 limited range.
-	memset(data, 0x10, ySize);               // Y plane = 16
-	memset(data + ySize, 0x80, ySize / 2);   // interleaved U/V = 128
-
+	// Copy the latest frame; only fall back to legal NV12 black (Y=16, U=V=128)
+	// when no frame is available (avoids a redundant full-frame memset).
+	bool haveFrame = false;
 	if (_client)
 	{
 		std::vector<BYTE> frame;
@@ -185,8 +188,16 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		{
 			DWORD copyBytes = (DWORD)std::min<size_t>(frame.size(), nv12Size);
 			if (copyBytes)
+			{
 				memcpy(data, frame.data(), copyBytes);
+				haveFrame = true;
+			}
 		}
+	}
+	if (!haveFrame)
+	{
+		memset(data, 0x10, ySize);               // Y plane = 16
+		memset(data + ySize, 0x80, ySize / 2);   // interleaved U/V = 128
 	}
 
 	RETURN_IF_FAILED(buffer->Unlock());
@@ -196,8 +207,12 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	RETURN_IF_FAILED(MFCreateSample(&sample));
 	RETURN_IF_FAILED(sample->AddBuffer(buffer.get()));
 
-	RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
-	RETURN_IF_FAILED(sample->SetSampleDuration((LONGLONG)(_client ? _client->FrameDuration100ns() : 333333)));
+	LONGLONG duration = 333333; // 30 fps fallback
+	if (_fpsNum > 0 && _fpsDen > 0)
+		duration = (LONGLONG)10000000 * _fpsDen / _fpsNum;
+	RETURN_IF_FAILED(sample->SetSampleTime(_nextSampleTime));
+	RETURN_IF_FAILED(sample->SetSampleDuration(duration));
+	_nextSampleTime += duration;
 
 	if (pToken)
 	{

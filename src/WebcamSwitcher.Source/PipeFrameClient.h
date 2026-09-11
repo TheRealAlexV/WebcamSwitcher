@@ -1,5 +1,6 @@
 #pragma once
 #include <vector>
+#include <string>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -16,6 +17,10 @@ public:
 	~PipeFrameClient();
 	PipeFrameClient(const PipeFrameClient&) = delete;
 	PipeFrameClient& operator=(const PipeFrameClient&) = delete;
+
+	// Selects the pipe the reader thread connects to. Must be called before
+	// Start(); an empty name restores the default switcher pipe.
+	void SetPipeName(const std::wstring& name) { _pipeName = name.empty() ? WS_PIPE_NAME : name; }
 
 	HRESULT Start();
 	void Stop();
@@ -41,6 +46,7 @@ private:
 	void Run();
 	static bool ReadExact(HANDLE h, void* buf, DWORD count);
 
+	std::wstring _pipeName{ WS_PIPE_NAME };
 	std::thread _thread;
 	std::atomic<bool> _running{ false };
 	std::atomic<UINT32> _width{ 0 };

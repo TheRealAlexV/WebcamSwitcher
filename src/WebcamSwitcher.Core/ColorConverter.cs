@@ -127,4 +127,39 @@ public static class ColorConverter
             }
         }
     }
+
+    /// <summary>Nearest-neighbor NV12 → Bgra8 downscale (for UI previews).</summary>
+    public static unsafe void Nv12ToBgra8Downscale(
+        byte* src, int srcW, int srcH, int srcStride,
+        byte[] dst, int dstW, int dstH)
+    {
+        byte* yPlane = src;
+        byte* uvPlane = src + srcStride * srcH;
+        fixed (byte* dp = dst)
+        {
+            for (int y = 0; y < dstH; y++)
+            {
+                int sy = Math.Min(srcH - 1, y * srcH / dstH);
+                byte* srow = yPlane + sy * srcStride;
+                byte* uvrow = uvPlane + (sy / 2) * srcStride;
+                byte* drow = dp + y * dstW * 4;
+                for (int x = 0; x < dstW; x++)
+                {
+                    int sx = Math.Min(srcW - 1, x * srcW / dstW);
+                    int yy = srow[sx];
+                    int u = uvrow[(sx / 2) * 2] - 128;
+                    int v = uvrow[(sx / 2) * 2 + 1] - 128;
+                    int c = yy - 16;
+                    int r = (298 * c + 409 * v + 128) >> 8;
+                    int g = (298 * c - 100 * u - 208 * v + 128) >> 8;
+                    int b = (298 * c + 516 * u + 128) >> 8;
+                    byte* o = drow + x * 4;
+                    o[0] = (byte)Math.Clamp(b, 0, 255);
+                    o[1] = (byte)Math.Clamp(g, 0, 255);
+                    o[2] = (byte)Math.Clamp(r, 0, 255);
+                    o[3] = 255;
+                }
+            }
+        }
+    }
 }

@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
+using WebcamSwitcher.Core;
 
 namespace WebcamSwitcher.App;
 
@@ -10,7 +11,8 @@ public partial class MainWindow : Window
 {
     private readonly PipelineController _pipeline;
     private readonly ObservableCollection<PreviewVm> _previews = new();
-    private readonly Dictionary<int, DateTime> _lastRender = new();
+    private readonly object _renderLock = new();
+    private readonly Dictionary<int, long> _lastRenderTicks = new();
 
     public MainWindow(PipelineController pipeline)
     {
@@ -57,7 +59,8 @@ public partial class MainWindow : Window
     private void RebuildPreviews()
     {
         _previews.Clear();
-        _lastRender.Clear();
+        lock (_renderLock)
+            _lastRenderTicks.Clear();
 
         var sources = _pipeline.Sources;
         for (int i = 0; i < sources.Count; i++)
@@ -74,9 +77,16 @@ public partial class MainWindow : Window
 
     private void OnPreview(int idx, PreviewVm vm, byte[] bgra)
     {
-        if (_lastRender.TryGetValue(idx, out var t) && (DateTime.Now - t).TotalMilliseconds < 66)
+        long now = DateTime.UtcNow.Ticks;
+        bool recent;
+        lock (_renderLock)
+        {
+            recent = _lastRenderTicks.TryGetValue(idx, out var t) && (now - t) < TimeSpan.TicksPerMillisecond * 66;
+            if (!recent)
+                _lastRenderTicks[idx] = now;
+        }
+        if (recent)
             return; // ~15fps throttle
-        _lastRender[idx] = DateTime.Now;
 
         var copy = new byte[bgra.Length];
         Buffer.BlockCopy(bgra, 0, copy, 0, bgra.Length);
