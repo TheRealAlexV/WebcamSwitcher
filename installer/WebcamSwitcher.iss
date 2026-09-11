@@ -3,7 +3,9 @@
 ; and registers the DLL (HKLM COM) on install / unregisters on uninstall.
 
 #define MyAppName "WebcamSwitcher"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0"
+#endif
 #define MyAppPublisher "TheRealAlexV"
 #define MyAppExeName "WebcamSwitcher.exe"
 
