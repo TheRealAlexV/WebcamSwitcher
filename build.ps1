@@ -35,4 +35,16 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 # 4. Copy the media source DLL next to the app.
 Copy-Item (Join-Path $root "src\WebcamSwitcher.Source\x64\$Configuration\WebcamSwitcher.Source.dll") $appOut -Force
 
+# 5. (Re)register the media source with COM so the Frame Server can load it.
+#    DllRegisterServer stores the DLL's ABSOLUTE path in HKLM, so this must run
+#    again whenever the repo moves. Needs an elevated shell; failure here is
+#    non-fatal - the app logs an actionable fix at startup.
+$sourceDll = Join-Path $appOut "WebcamSwitcher.Source.dll"
+& "$env:SystemRoot\System32\regsvr32.exe" /s $sourceDll
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Registered media source: $sourceDll"
+} else {
+    Write-Warning "regsvr32 failed (exit $LASTEXITCODE) - run an elevated shell and: regsvr32 /s `"$sourceDll`""
+}
+
 Write-Host "Build complete. App: $appOut"

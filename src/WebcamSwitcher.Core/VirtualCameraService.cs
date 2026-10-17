@@ -21,6 +21,14 @@ public sealed class VirtualCameraService : IDisposable
         "WebcamSwitcher",
         "vcams.ini");
 
+    /// <summary>Media source DLL shipped next to the app (the registered path).</summary>
+    private static readonly string SourceDll =
+        Path.Combine(AppContext.BaseDirectory, "WebcamSwitcher.Source.dll");
+
+    /// <summary>HKLM COM registration key for the media source (stores an absolute DLL path).</summary>
+    private const string SourceClsidKey =
+        @"Software\Classes\CLSID\" + Protocol.SourceClsid + @"\InprocServer32";
+
     private readonly List<IntPtr> _handles = new();
     private bool _switcherStarted;
 
@@ -40,6 +48,15 @@ public sealed class VirtualCameraService : IDisposable
     {
         if (_switcherStarted)
             return true;
+
+        // Fail loudly and actionably - never crash - if the native media source or
+        // its COM registration is unavailable (e.g. the app was moved after
+        // regsvr32, or a build was interrupted before the DLL was copied next to
+        // the app). Otherwise the DllImport below throws DllNotFoundException,
+        // which escapes as an unhandled exception and terminates the process.
+        if (!PreflightNativeSource())
+            return false;
+
         // A previous attempt may have left some passthrough handles behind; clear
         // them so a retry never leaks duplicate virtual cameras.
         if (_handles.Count > 0)
@@ -71,7 +88,21 @@ public sealed class VirtualCameraService : IDisposable
         bool switcherOk = false;
         for (int i = 0; i < names.Count; i++)
         {
-            int hr = NativeInterop.WebcamSwitcher_Start(names[i], Protocol.SourceClsid, out IntPtr handle);
+            int hr;
+            IntPtr handle;
+            try
+            {
+                hr = NativeInterop.WebcamSwitcher_Start(names[i], Protocol.SourceClsid, out handle);
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or BadImageFormatException or EntryPointNotFoundException)
+            {
+                // Belt and braces: even if the pre-flight passed, a broken or
+                // mismatched native DLL must not take the app down.
+                AppLog.Write($"VirtualCameraService: native media source unavailable ({ex.GetType().Name}: {ex.Message}). " +
+                             "Rebuild with build.ps1 and re-run regsvr32 if the app moved.");
+                break;
+            }
+
             if (hr < 0 || handle == IntPtr.Zero)
             {
                 AppLog.Write($"VirtualCameraService.Start('{names[i]}') failed hr=0x{hr:X8}");
@@ -103,6 +134,58 @@ public sealed class VirtualCameraService : IDisposable
     }
 
     public void Dispose() => Stop();
+
+    /// <summary>
+    /// The media source is registered in HKLM by absolute DLL path (see
+    /// <c>WebcamSwitcher.Source/DllRegisterServer</c>). Moving the app - or
+    /// deleting its build output - after registration leaves that path dangling,
+    /// and <c>MFCreateVirtualCamera</c> then fails with 0x8007007E
+    /// (ERROR_MOD_NOT_FOUND), so activation silently does nothing. Detect it up
+    /// front and log an actionable fix instead of an opaque HRESULT.
+    /// </summary>
+    /// <returns>
+    /// False when the virtual cameras cannot possibly start (DLL missing, or the
+    /// registration is absent or points at a deleted file); true otherwise.
+    /// </returns>
+    private static bool PreflightNativeSource()
+    {
+        // The DllImport below resolves against the app directory. If the file is
+        // gone, calling into it throws DllNotFoundException and kills the process,
+        // so refuse to call it at all.
+        if (!File.Exists(SourceDll))
+        {
+            AppLog.Write($"VirtualCameraService: '{SourceDll}' is missing - run build.ps1 to restore it. " +
+                         "Virtual cameras are unavailable until then.");
+            return false;
+        }
+
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(SourceClsidKey);
+
+            if (key?.GetValue(null) is not string registered || registered.Length == 0)
+            {
+                AppLog.Write($"VirtualCameraService: media source not registered in HKLM ({SourceClsidKey}). " +
+                             $"Fix (elevated): regsvr32 /s \"{SourceDll}\"");
+                return false;
+            }
+
+            if (!File.Exists(registered))
+            {
+                AppLog.Write($"VirtualCameraService: media source registration is stale - '{registered}' does not exist. " +
+                             $"Fix (elevated): regsvr32 /s \"{SourceDll}\"");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            // An unreadable key (permissions etc.) must not block a legitimate
+            // start - let the create call decide.
+            AppLog.Write($"VirtualCameraService: registration check failed: {ex.Message}");
+        }
+
+        return true;
+    }
 
     private static string Dedupe(string baseName, HashSet<string> used)
     {
