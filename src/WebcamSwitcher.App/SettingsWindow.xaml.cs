@@ -108,7 +108,8 @@ public partial class SettingsWindow : Window
                 DeviceId = sel.DeviceId,
                 FriendlyName = sel.FriendlyName,
                 CaptureWidth = cw,
-                CaptureHeight = ch
+                CaptureHeight = ch,
+                CaptureFormat = row.SelectedFormat
             });
             hotkeys.Add(row.HotkeyBox.Text);
         }
@@ -154,12 +155,15 @@ public partial class SettingsWindow : Window
         public Panel Panel { get; }
         public ComboBox Combo { get; }
         public ComboBox CaptureCombo { get; }
+        public ComboBox FormatCombo { get; }
         public TextBox HotkeyBox { get; }
 
         private static readonly string[] CaptureSizes =
         {
             "Auto", "1920x1080", "1280x720", "1024x576", "960x720", "800x600", "640x480", "640x360"
         };
+
+        private static readonly string[] FormatOptions = { "Auto", "Nv12", "Mjpg" };
 
         public CameraConfig? SelectedCamera => Combo.SelectedItem as CameraConfig;
 
@@ -176,6 +180,20 @@ public partial class SettingsWindow : Window
                         return (cw, ch);
                 }
                 return (null, null);
+            }
+        }
+
+        /// <summary>Chosen capture-format preference for this camera.</summary>
+        public string SelectedFormat
+        {
+            get
+            {
+                var s = FormatCombo.Text?.Trim();
+                if (string.Equals(s, "Nv12", StringComparison.OrdinalIgnoreCase))
+                    return "Nv12";
+                if (string.Equals(s, "Mjpg", StringComparison.OrdinalIgnoreCase))
+                    return "Mjpg";
+                return "Auto";
             }
         }
 
@@ -210,6 +228,15 @@ public partial class SettingsWindow : Window
                 ToolTip = "Capture resolution. Auto matches the output aspect (avoids black bars)."
             };
 
+            FormatCombo = new ComboBox
+            {
+                Width = 84,
+                IsEditable = true,
+                ItemsSource = FormatOptions,
+                Text = string.IsNullOrWhiteSpace(selected?.CaptureFormat) ? "Auto" : selected!.CaptureFormat,
+                ToolTip = "Capture format. Auto keeps NV12 when it runs at full rate and switches to MJPG when that is the only way to reach the output frame rate."
+            };
+
             var removeBtn = new Button
             {
                 Content = "Remove",
@@ -235,10 +262,22 @@ public partial class SettingsWindow : Window
                 Margin = new Thickness(8, 0, 6, 0)
             };
 
-            Panel = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
+            var fmtLabel = new TextBlock
+            {
+                Text = "Format",
+                Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 6, 0)
+            };
+
+            // WrapPanel so the extra controls flow onto a second line on narrow
+            // windows instead of being clipped by the fixed-width dialog.
+            Panel = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
             Panel.Children.Add(Combo);
             Panel.Children.Add(capLabel);
             Panel.Children.Add(CaptureCombo);
+            Panel.Children.Add(fmtLabel);
+            Panel.Children.Add(FormatCombo);
             Panel.Children.Add(label);
             Panel.Children.Add(HotkeyBox);
             Panel.Children.Add(removeBtn);

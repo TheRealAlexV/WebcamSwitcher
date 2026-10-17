@@ -121,7 +121,7 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
   "Height": 1080,
   "Fps": 30,
   "Cameras": [
-    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "HD Pro Webcam C920" },
+    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "HD Pro Webcam C920", "CaptureFormat": "Auto" },
     { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "OsmoPocket3" }
   ],
   "ActiveIndex": 0,
@@ -138,6 +138,14 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
   device ID; if the list is empty, the first two physical cameras are used
   automatically. An optional `CaptureWidth` / `CaptureHeight` per camera pins the
   capture resolution (otherwise a matching native format is chosen).
+- `CaptureFormat` (per camera, `Auto` by default) — `Auto` picks the fastest
+  stream at the capture size and keeps uncompressed NV12, which needs no decode.
+  `Nv12` forces uncompressed. `Mjpg` forces the camera's compressed stream and
+  decodes it, which is the only way some cameras reach full frame rate at higher
+  resolutions (a USB 2.0 camera cannot carry 1080p uncompressed). If the decoded
+  stream produces no frames, the app logs why and falls back to uncompressed
+  automatically rather than leaving the camera dark. Set it from Settings →
+  Format, per camera.
 - `Width` / `Height` / `Fps` — the virtual cameras' output format (default
   1920x1080 @ 30fps). Source frames are scaled to this.
 - `Hotkeys` — one per camera, in order. Format: `Modifier+Modifier+Key`

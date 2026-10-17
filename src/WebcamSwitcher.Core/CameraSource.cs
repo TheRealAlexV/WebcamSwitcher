@@ -25,12 +25,16 @@ public sealed class CameraSource : IAsyncDisposable
 {
     private MediaCapture? _capture;
     private MediaFrameReader? _reader;
+    private MfMjpegSource? _mf;
     private byte[] _nv12 = Array.Empty<byte>();
     private byte[] _preview = Array.Empty<byte>();
     private readonly object _lock = new();
     private int _nullFrames;
     private int _firstFrameLogged;
     private int _convertErrors;
+    private int _framesArrived;
+    private int _fpsWindowFrames;
+    private DateTime _fpsWindowStart = DateTime.UtcNow;
 
     public const int PreviewWidth = 320;
     public const int PreviewHeight = 180;
@@ -55,6 +59,17 @@ public sealed class CameraSource : IAsyncDisposable
     /// </summary>
     public bool PreviewEnabled { get; set; } = true;
 
+    /// <summary>
+    /// Capture-format preference for this camera: "Auto" (default) picks the fastest
+    /// stream at the chosen size and keeps NV12 when it is already at full rate,
+    /// "Nv12" forces uncompressed, "Mjpg" forces compressed (higher frame rate on
+    /// bandwidth-limited cameras, at the cost of a decode).
+    /// </summary>
+    public string PreferredFormat { get; set; } = "Auto";
+
+    /// <summary>Subtype actually selected for the capture stream.</summary>
+    private string _chosenSubtype = "NV12";
+
     public CameraSource(string deviceId, string displayName)
     {
         DeviceId = deviceId;
@@ -68,6 +83,9 @@ public sealed class CameraSource : IAsyncDisposable
         OutputHeight = outHeight;
         _nv12 = new byte[Protocol.Nv12Size(outWidth, outHeight)];
         _preview = new byte[PreviewWidth * PreviewHeight * 4];
+        // A restart must not inherit "a frame already arrived" from the last run.
+        Interlocked.Exchange(ref _framesArrived, 0);
+        Interlocked.Exchange(ref _firstFrameLogged, 0);
 
         AppLog.Write($"Source.StartAsync({DisplayName}): finding group");
         // Callers may pass a pre-enumerated list so N cameras don't each perform
@@ -78,6 +96,23 @@ public sealed class CameraSource : IAsyncDisposable
         {
             AppLog.Write($"Source.StartAsync({DisplayName}): group NOT FOUND");
             return false;
+        }
+
+        // MJPG: the WinRT reader cannot decode it (it starts and yields no frames),
+        // so when MJPG is explicitly requested try the Media Foundation source
+        // reader first. It must run BEFORE MediaCapture opens the device, because
+        // MediaCapture takes exclusive control and MF could not open it afterwards.
+        // Any MF failure falls through to the unchanged WinRT path below.
+        bool captureSizeMatches =
+            (captureWidth <= 0 || captureWidth == outWidth) &&
+            (captureHeight <= 0 || captureHeight == outHeight);
+
+        if (PreferredFormat.Equals("Mjpg", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!captureSizeMatches)
+                AppLog.Write($"Source({DisplayName}): MF-MJPEG skipped (capture {captureWidth}x{captureHeight} != output {outWidth}x{outHeight})");
+            else if (await TryStartMfMjpegAsync())
+                return true;
         }
 
         _capture = new MediaCapture();
@@ -121,17 +156,119 @@ public sealed class CameraSource : IAsyncDisposable
         // (the default, set explicitly for low latency / no backlog).
         _reader.AcquisitionMode = MediaFrameReaderAcquisitionMode.Realtime;
         _reader.FrameArrived += OnFrameArrived;
+
+        // A compressed stream (MJPG) only works if the pipeline can decode it.
+        // MediaFrameReader does not decode on its own, so prove frames actually
+        // arrive and otherwise revert to uncompressed - a config choice must never
+        // leave a camera black.
+        if (IsCompressed(_chosenSubtype) && !await WaitForFirstFrameAsync(TimeSpan.FromMilliseconds(2500)))
+        {
+            AppLog.Write($"Source({DisplayName}): {_chosenSubtype} produced no frames (reader cannot decode it); reverting to uncompressed");
+
+            _reader.FrameArrived -= OnFrameArrived;
+            try { await _reader.StopAsync(); } catch { }
+            _reader.Dispose();
+            _reader = null;
+
+            await TrySetCaptureFormatAsync(colorSource, captureWidth, captureHeight, forceUncompressed: true);
+            _reader = await StartReaderAsync(colorSource);
+            _reader.AcquisitionMode = MediaFrameReaderAcquisitionMode.Realtime;
+            _reader.FrameArrived += OnFrameArrived;
+        }
+
         AppLog.Write($"Source.StartAsync({DisplayName}): reader started");
         Running = true;
         return true;
     }
 
     /// <summary>
-    /// Chooses and applies a capture format whose aspect matches the output, so the
-    /// Frame Server does not pillarbox/letterbox. When an explicit capture size is
-    /// configured, the closest supported format to that size is used instead.
+    /// Tries the Media Foundation MJPG backend. Returns true only when it started
+    /// AND delivered a frame within 2.5s; on any failure the source is disposed and
+    /// the caller continues with the WinRT path.
     /// </summary>
-    private async Task TrySetCaptureFormatAsync(MediaFrameSource source, int captureWidth, int captureHeight)
+    private async Task<bool> TryStartMfMjpegAsync()
+    {
+        MfMjpegSource? mf = new MfMjpegSource(DeviceId, DisplayName, OutputWidth, OutputHeight);
+        mf.FrameReady += OnMfFrameReady;
+
+        try
+        {
+            AppLog.Write($"Source({DisplayName}): trying Media Foundation MJPEG backend {OutputWidth}x{OutputHeight}");
+            if (!mf.Start())
+            {
+                AppLog.Write($"Source({DisplayName}): MF-MJPEG failed to start; falling back to WinRT");
+                return false;
+            }
+
+            if (!await WaitForFirstFrameAsync(TimeSpan.FromMilliseconds(2500)))
+            {
+                AppLog.Write($"Source({DisplayName}): MF-MJPEG produced no frame in 2.5s; falling back to WinRT");
+                return false;
+            }
+
+            _mf = mf;
+            mf = null; // ownership transferred to the source
+            _chosenSubtype = "MJPG";
+            Running = true;
+            AppLog.Write($"Source.StartAsync({DisplayName}): using Media Foundation MJPEG backend {OutputWidth}x{OutputHeight}");
+            return true;
+        }
+        finally
+        {
+            if (mf != null)
+            {
+                mf.FrameReady -= OnMfFrameReady;
+                await mf.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Frame callback for the MF backend: publishes the same tight NV12 buffer
+    /// contract as the WinRT path, plus the optional 320x180 Bgra8 preview.
+    /// </summary>
+    private unsafe void OnMfFrameReady(byte[] nv12)
+    {
+        Interlocked.Increment(ref _framesArrived);
+        if (Interlocked.Exchange(ref _firstFrameLogged, 1) == 0)
+            AppLog.Write($"Source({DisplayName}): first frame {OutputWidth}x{OutputHeight} NV12 (MF-MJPEG)");
+
+        // Read once per frame: toggling previews mid-stream must not tear a frame.
+        bool previews = PreviewEnabled;
+        byte[] preview;
+        lock (_lock)
+            preview = _preview;
+
+        if (previews)
+        {
+            fixed (byte* src = nv12)
+                ColorConverter.Nv12ToBgra8Downscale(
+                    src, OutputWidth, OutputHeight, OutputWidth,
+                    preview, PreviewWidth, PreviewHeight);
+        }
+
+        try
+        {
+            FrameReady?.Invoke(nv12);
+        }
+        catch (Exception ex)
+        {
+            if (Interlocked.Increment(ref _convertErrors) <= 5)
+                AppLog.Write($"Source({DisplayName}): MF-MJPEG frame publish threw {ex.GetType().Name}: {ex.Message}");
+        }
+
+        if (previews)
+            PreviewReady?.Invoke(preview, PreviewWidth, PreviewHeight);
+    }
+
+    /// <summary>
+    /// Chooses and applies a capture format whose aspect matches the output, so the
+    /// Frame Server does not pillarbox/letterbox, and whose frame rate is the best
+    /// that size can sustain. Uncompressed NV12 is preferred (no conversion), but
+    /// bandwidth-limited cameras (the C920 over USB 2.0, for example) only reach
+    /// their full rate in MJPG, so a compressed stream is used when it is faster.
+    /// </summary>
+    private async Task TrySetCaptureFormatAsync(MediaFrameSource source, int captureWidth, int captureHeight, bool forceUncompressed = false)
     {
         try
         {
@@ -145,32 +282,78 @@ public sealed class CameraSource : IAsyncDisposable
             double targetAspect = (double)wantW / wantH;
             double targetArea = (double)wantW * wantH;
 
-            MediaFrameFormat best = formats.OrderBy(f =>
-            {
-                double area = (double)f.VideoFormat.Width * f.VideoFormat.Height;
-                if (forced)
-                    return (Math.Abs(area - targetArea), 0.0, 0.0);
+            // 1. Pick the size: exact when forced, otherwise best-matching aspect then
+            //    closest area, so 16:9 stays 16:9 and nothing gets pillarboxed.
+            var size = formats
+                .GroupBy(f => (W: f.VideoFormat.Width, H: f.VideoFormat.Height))
+                .Select(g => new
+                {
+                    g.Key.W,
+                    g.Key.H,
+                    Area = (double)g.Key.W * g.Key.H,
+                    AspectErr = Math.Abs((double)g.Key.W / g.Key.H - targetAspect),
+                    Rates = g.ToList()
+                })
+                .OrderBy(s => forced
+                    ? (Math.Abs(s.Area - targetArea), s.AspectErr)
+                    : (s.AspectErr, Math.Abs(s.Area - targetArea)))
+                .First();
 
-                bool exact = f.VideoFormat.Width == wantW && f.VideoFormat.Height == wantH;
-                double aspectErr = Math.Abs((double)f.VideoFormat.Width / f.VideoFormat.Height - targetAspect);
-                return (exact ? 0.0 : 1.0, Math.Round(aspectErr, 4), Math.Abs(area - targetArea));
-            }).First();
+            // 2. Pick the subtype + rate at that size.
+            var candidates = size.Rates
+                .Select(f => new { Format = f, Fps = FpsOf(f), Compressed = IsCompressed(f.Subtype) })
+                .OrderByDescending(c => c.Fps)
+                .ToList();
+
+            var rawBest = candidates.FirstOrDefault(c => !c.Compressed);
+            var overall = candidates[0];
+            string prefer = forceUncompressed ? "Nv12" : (PreferredFormat ?? "Auto");
+
+            var chosen =
+                prefer.Equals("Mjpg", StringComparison.OrdinalIgnoreCase)
+                    ? candidates.FirstOrDefault(c => c.Compressed) ?? overall
+                    : prefer.Equals("Nv12", StringComparison.OrdinalIgnoreCase)
+                        ? rawBest ?? overall
+                        : rawBest != null && rawBest.Fps >= overall.Fps * 0.95
+                            ? rawBest
+                            : overall;
+
+            var rates = string.Join(", ", candidates.Select(c => $"{c.Format.Subtype}@{c.Fps:0.#}"));
+            AppLog.Write($"Source({DisplayName}): {size.W}x{size.H} rates [{rates}] -> {chosen.Format.Subtype}@{chosen.Fps:0.#} (prefer {prefer})");
+
+            _chosenSubtype = chosen.Format.Subtype ?? "NV12";
 
             var cur = source.CurrentFormat;
-            if (cur != null && cur.VideoFormat.Width == best.VideoFormat.Width && cur.VideoFormat.Height == best.VideoFormat.Height)
+            if (cur != null &&
+                cur.VideoFormat.Width == chosen.Format.VideoFormat.Width &&
+                cur.VideoFormat.Height == chosen.Format.VideoFormat.Height &&
+                string.Equals(cur.Subtype, _chosenSubtype, StringComparison.OrdinalIgnoreCase))
             {
-                AppLog.Write($"Source({DisplayName}): capture format already {best.VideoFormat.Width}x{best.VideoFormat.Height}");
+                AppLog.Write($"Source({DisplayName}): capture format already {size.W}x{size.H} {_chosenSubtype}");
                 return;
             }
 
-            await source.SetFormatAsync(best);
-            AppLog.Write($"Source({DisplayName}): capture format -> {best.VideoFormat.Width}x{best.VideoFormat.Height} (target {wantW}x{wantH}{(forced ? ", forced" : "")})");
+            await source.SetFormatAsync(chosen.Format);
+            AppLog.Write($"Source({DisplayName}): capture format -> {size.W}x{size.H} {_chosenSubtype}@{chosen.Fps:0.#} (target {wantW}x{wantH}{(forced ? ", forced" : "")})");
         }
         catch (Exception ex)
         {
             AppLog.Write($"Source({DisplayName}): SetFormat failed ({ex.Message}); keeping default");
         }
     }
+
+    private static double FpsOf(MediaFrameFormat f)
+    {
+        var r = f.FrameRate;
+        if (r == null || r.Denominator == 0)
+            return 0;
+        return (double)r.Numerator / r.Denominator;
+    }
+
+    private static bool IsCompressed(string? subtype) =>
+        string.Equals(subtype, "MJPG", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(subtype, "H264", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(subtype, "HEVC", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Creates and starts a frame reader that produces a decoded color frame.
@@ -180,16 +363,20 @@ public sealed class CameraSource : IAsyncDisposable
     /// </summary>
     private async Task<MediaFrameReader> StartReaderAsync(MediaFrameSource colorSource)
     {
-        // Request NV12 at the exact output size so the Frame Server does decode +
-        // resize (and color conversion) itself, removing the managed BGRA→NV12
-        // conversion from the hot path.
+        // Uncompressed sources are requested as NV12 at the exact output size, so the
+        // Frame Server does any resize + color conversion itself and the hot path is a
+        // straight copy. The same request is made for a compressed source (MJPG): the
+        // reader can hand back decoded NV12, and NV12 is the one subtype that works
+        // for both. Bgra8 is only a fallback, because on a compressed stream it is the
+        // path that yields no frames at all.
         try
         {
             var r = await _capture!.CreateFrameReaderAsync(
                 colorSource, MediaEncodingSubtypes.Nv12,
                 new BitmapSize { Width = (uint)OutputWidth, Height = (uint)OutputHeight });
             await r.StartAsync();
-            AppLog.Write($"Source({DisplayName}): frame reader = Nv12 {OutputWidth}x{OutputHeight}");
+            AppLog.Write($"Source({DisplayName}): frame reader = Nv12 {OutputWidth}x{OutputHeight}" +
+                         (IsCompressed(_chosenSubtype) ? $" (decoding {_chosenSubtype})" : ""));
             return r;
         }
         catch (Exception ex)
@@ -201,6 +388,18 @@ public sealed class CameraSource : IAsyncDisposable
         await bgra.StartAsync();
         AppLog.Write($"Source({DisplayName}): frame reader = Bgra8");
         return bgra;
+    }
+
+    private async Task<bool> WaitForFirstFrameAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (Volatile.Read(ref _framesArrived) > 0)
+                return true;
+            await Task.Delay(50);
+        }
+        return Volatile.Read(ref _framesArrived) > 0;
     }
 
     private void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
@@ -215,6 +414,17 @@ public sealed class CameraSource : IAsyncDisposable
         }
         if (Interlocked.Exchange(ref _firstFrameLogged, 1) == 0)
             AppLog.Write($"Source({DisplayName}): first frame {sw.PixelWidth}x{sw.PixelHeight} {sw.BitmapPixelFormat}");
+        Interlocked.Increment(ref _framesArrived);
+        if (++_fpsWindowFrames >= 75)
+        {
+            double secs = (DateTime.UtcNow - _fpsWindowStart).TotalSeconds;
+            if (secs >= 4)
+            {
+                AppLog.Write($"Source({DisplayName}): {_fpsWindowFrames} frames in {secs:0.0}s = {_fpsWindowFrames / secs:0.0} fps");
+                _fpsWindowStart = DateTime.UtcNow;
+                _fpsWindowFrames = 0;
+            }
+        }
 
         try
         {
@@ -303,6 +513,16 @@ public sealed class CameraSource : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_mf != null)
+        {
+            var mf = _mf;
+            _mf = null;
+            mf.FrameReady -= OnMfFrameReady;
+            AppLog.Write($"Source.Dispose({DisplayName}): stopping MF-MJPEG");
+            try { mf.Dispose(); } catch (Exception ex) { AppLog.Write($"Source.Dispose({DisplayName}): MF-MJPEG dispose failed {ex.GetType().Name}: {ex.Message}"); }
+            AppLog.Write($"Source.Dispose({DisplayName}): MF-MJPEG stopped");
+        }
+
         try
         {
             if (_reader != null)
@@ -316,9 +536,12 @@ public sealed class CameraSource : IAsyncDisposable
         catch { }
 
         _reader = null;
-        AppLog.Write($"Source.Dispose({DisplayName}): MediaCapture.Dispose");
-        _capture?.Dispose();
-        _capture = null;
+        if (_capture != null)
+        {
+            AppLog.Write($"Source.Dispose({DisplayName}): MediaCapture.Dispose");
+            _capture.Dispose();
+            _capture = null;
+        }
         Running = false;
     }
 }

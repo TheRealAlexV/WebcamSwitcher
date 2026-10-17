@@ -12,6 +12,14 @@ public class CameraConfig
     /// </summary>
     public int? CaptureWidth { get; set; }
     public int? CaptureHeight { get; set; }
+
+    /// <summary>
+    /// Optional capture-format preference: "Auto" (default), "Nv12" or "Mjpg".
+    /// Auto keeps the uncompressed stream when it already runs at full rate and
+    /// otherwise switches to MJPG, which is the only way a USB 2.0 camera reaches
+    /// 30 fps at 720p/1080p.
+    /// </summary>
+    public string CaptureFormat { get; set; } = "Auto";
 }
 
 public class AppConfig
