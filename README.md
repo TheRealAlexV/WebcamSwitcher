@@ -130,7 +130,8 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
   "StartWithWindows": false,
   "StartMinimized": false,
   "VirtualCameraOnLaunch": true,
-  "PreviewsEnabled": true
+  "PreviewsEnabled": true,
+  "PreferSmooth30Fps": false
 }
 ```
 
@@ -160,6 +161,14 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
 - `PreviewsEnabled` — render the live camera thumbnails (main window →
   "Previews"). Turning previews off skips the per-frame preview scaling, which
   saves CPU while capture and every virtual camera keep running.
+- `PreferSmooth30Fps` — pin each camera's exposure to a manual 1/30 s so a dim
+  scene cannot make it lengthen integration time and drop its frame rate
+  (Settings → "Prefer smooth 30 fps"). UVC cameras step down to 24, 20 or 15 fps
+  as exposure grows, so this is what keeps the feed at a constant 30 fps at the
+  cost of a darker, noisier image in low light. Only the exposure is shortened,
+  never lengthened: a bright scene keeps whatever auto exposure chose. Turning
+  it off returns exposure to automatic. Cameras without exposure control (e.g.
+  action cameras) are left alone and say so in the log.
 
 > The output format is also written to
 > `%ProgramData%\WebcamSwitcher\format.ini` and the virtual-camera → pipe

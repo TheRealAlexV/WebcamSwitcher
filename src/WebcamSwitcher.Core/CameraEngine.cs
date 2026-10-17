@@ -104,6 +104,7 @@ public sealed class CameraEngine : IAsyncDisposable
 
             var source = new CameraSource(c.DeviceId, c.FriendlyName);
             source.PreviewEnabled = _previewsEnabled;
+            source.PreferSmooth30Fps = config.PreferSmooth30Fps;
             source.PreferredFormat = string.IsNullOrWhiteSpace(c.CaptureFormat) ? "Auto" : c.CaptureFormat;
             int slot = i;
             source.FrameReady += nv12 => Publish(slot, nv12, w, h);

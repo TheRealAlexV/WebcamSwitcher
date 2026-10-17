@@ -46,6 +46,13 @@ public class AppConfig
     /// </summary>
     public bool PreviewsEnabled { get; set; } = true;
 
+    /// <summary>
+    /// When on, each camera's exposure is pinned to manual 1/30 s so a dim scene
+    /// cannot make the camera lengthen integration time and drop to 15 fps. The
+    /// image may be darker in low light; that is the accepted tradeoff.
+    /// </summary>
+    public bool PreferSmooth30Fps { get; set; }
+
     /// <summary>Clamps/repairs values so they are always valid before use.</summary>
     public void Normalize()
     {

@@ -60,6 +60,13 @@ public sealed class CameraSource : IAsyncDisposable
     public bool PreviewEnabled { get; set; } = true;
 
     /// <summary>
+    /// When true, exposure is pinned to manual 1/30 s after the reader starts so
+    /// the camera cannot lengthen integration time in dim light and drop to its
+    /// 15 fps mode. The image may be darker; that is the accepted tradeoff.
+    /// </summary>
+    public bool PreferSmooth30Fps { get; set; }
+
+    /// <summary>
     /// Capture-format preference for this camera: "Auto" (default) picks the fastest
     /// stream at the chosen size and keeps NV12 when it is already at full rate,
     /// "Nv12" forces uncompressed, "Mjpg" forces compressed (higher frame rate on
@@ -176,9 +183,118 @@ public sealed class CameraSource : IAsyncDisposable
             _reader.FrameArrived += OnFrameArrived;
         }
 
+        // Must come last: selecting a capture format resets the device controls,
+        // so pinning exposure any earlier would be silently undone.
+        ApplyExposurePreference();
+
         AppLog.Write($"Source.StartAsync({DisplayName}): reader started");
         Running = true;
         return true;
+    }
+
+    /// <summary>
+    /// Pins exposure to a manual 1/30 s integration time when the user asked for
+    /// smooth 30 fps. UVC auto-exposure lengthens exposure in dim light and drops
+    /// the camera to its 1/15 s mode (exactly 15 fps); a manual 1/30 s cap keeps
+    /// the frame rate at the cost of a darker image. Never throws: a camera
+    /// without exposure control must keep capturing normally.
+    /// </summary>
+    private void ApplyExposurePreference()
+    {
+        if (!PreferSmooth30Fps)
+        {
+            RestoreAutoExposure();
+            return;
+        }
+
+        try
+        {
+            var exposure = _capture?.VideoDeviceController?.Exposure;
+            if (exposure == null || !exposure.Capabilities.Supported)
+            {
+                AppLog.Write($"Source({DisplayName}): exposure control unsupported; cannot pin 30 fps");
+                return;
+            }
+
+            var caps = exposure.Capabilities;
+            if (caps.Step <= 0)
+            {
+                AppLog.Write($"Source({DisplayName}): exposure control has no usable step; skipping 30 fps cap");
+                return;
+            }
+
+            // Read what auto-exposure currently wants while it is still in auto, so a
+            // scene that is already correctly exposed is left alone instead of being
+            // brightened (and blown out) by a fixed value.
+            double autoValue = 0;
+            bool haveAuto = caps.AutoModeSupported && exposure.TryGetValue(out autoValue);
+
+            // Some cameras report this control in seconds, others in log2 seconds
+            // (the UVC/DirectShow convention, where -5 == 1/32 s). A range that sits
+            // at or below zero with small integer values is the log2 form.
+            bool log2Units = caps.Max <= 0d && caps.Min < 0d;
+
+            double cap = log2Units ? Math.Log(1.0 / 30.0, 2.0) : 1.0 / 30.0;
+
+            // Only ever shorten the exposure: keep auto's value when it is already
+            // shorter than the cap (bright scene), otherwise clamp down to the cap.
+            double target = haveAuto ? Math.Min(autoValue, cap) : cap;
+
+            // Snap to the control's grid and keep it inside the advertised range.
+            target = caps.Min + Math.Round((target - caps.Min) / caps.Step) * caps.Step;
+            target = Math.Max(caps.Min, Math.Min(caps.Max, target));
+
+            if (!exposure.TrySetAuto(false))
+            {
+                AppLog.Write($"Source({DisplayName}): exposure auto-off failed; cannot cap exposure");
+                return;
+            }
+
+            if (!exposure.TrySetValue(target))
+            {
+                AppLog.Write($"Source({DisplayName}): exposure set {target} failed (min={caps.Min} max={caps.Max} step={caps.Step})");
+                return;
+            }
+
+            double applied = target;
+            exposure.TryGetValue(out applied);
+            string pretty = log2Units
+                ? $"1/{Math.Round(Math.Pow(2, -applied)):0}s"
+                : $"{applied:0.0000}s";
+            AppLog.Write($"Source({DisplayName}): exposure capped at {applied} ({(log2Units ? "log2 s" : "s")}) = {pretty} for 30 fps (auto wanted {autoValue})");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"Source({DisplayName}): exposure pinning failed {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Puts exposure back under camera control. Only meaningful after
+    /// <see cref="ApplyExposurePreference"/> pinned a manual value: leaving the
+    /// device in manual would keep the image dark for every other app too, so
+    /// turning the option off has to undo it. Never throws.
+    /// </summary>
+    private void RestoreAutoExposure()
+    {
+        try
+        {
+            var exposure = _capture?.VideoDeviceController?.Exposure;
+            if (exposure == null || !exposure.Capabilities.Supported || !exposure.Capabilities.AutoModeSupported)
+                return;
+
+            if (exposure.TryGetAuto(out bool auto) && auto)
+                return; // already automatic: nothing was pinned on this device
+
+            if (exposure.TrySetAuto(true))
+                AppLog.Write($"Source({DisplayName}): exposure returned to automatic");
+            else
+                AppLog.Write($"Source({DisplayName}): exposure auto-on failed; device may still be manual");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"Source({DisplayName}): exposure restore failed {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -211,6 +327,8 @@ public sealed class CameraSource : IAsyncDisposable
             _chosenSubtype = "MJPG";
             Running = true;
             AppLog.Write($"Source.StartAsync({DisplayName}): using Media Foundation MJPEG backend {OutputWidth}x{OutputHeight}");
+            if (PreferSmooth30Fps)
+                AppLog.Write($"Source({DisplayName}): exposure pinning is not applied on the MF/MJPG path");
             return true;
         }
         finally

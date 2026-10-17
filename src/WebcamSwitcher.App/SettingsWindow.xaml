@@ -42,6 +42,11 @@
             <TextBlock Foreground="#888" Text="When on, every camera's virtual camera starts with capture — including when capture is toggled back on — so other apps can use them immediately."
                        TextWrapping="Wrap" Margin="0,0,0,16"/>
 
+            <CheckBox x:Name="PreferSmooth30FpsBox"
+                      Content="Prefer smooth 30 fps (may darken the image in low light)"
+                      Foreground="White" Margin="0,0,0,16"
+                      AutomationProperties.AutomationId="PreferSmooth30FpsBox"/>
+
             <TextBlock x:Name="NoteText" Foreground="#888" Margin="0,0,0,12" TextWrapping="Wrap"/>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">

@@ -52,6 +52,7 @@ public partial class SettingsWindow : Window
         StartWithWindowsBox.IsChecked = config.StartWithWindows;
         StartMinimizedBox.IsChecked = config.StartMinimized;
         VirtualCameraOnLaunchBox.IsChecked = config.VirtualCameraOnLaunch;
+        PreferSmooth30FpsBox.IsChecked = config.PreferSmooth30Fps;
 
         for (int i = 0; i < config.Cameras.Count; i++)
         {
@@ -133,6 +134,7 @@ public partial class SettingsWindow : Window
         next.StartWithWindows = StartWithWindowsBox.IsChecked == true;
         next.StartMinimized = StartMinimizedBox.IsChecked == true;
         next.VirtualCameraOnLaunch = VirtualCameraOnLaunchBox.IsChecked == true;
+        next.PreferSmooth30Fps = PreferSmooth30FpsBox.IsChecked == true;
         // Not a settings control: carry the current runtime preview state through.
         next.PreviewsEnabled = _pipeline.Config.PreviewsEnabled;
 
