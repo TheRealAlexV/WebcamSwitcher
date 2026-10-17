@@ -51,6 +51,7 @@ public partial class SettingsWindow : Window
         RotateHotkeyBox.Text = config.RotateHotkey ?? "";
         StartWithWindowsBox.IsChecked = config.StartWithWindows;
         StartMinimizedBox.IsChecked = config.StartMinimized;
+        VirtualCameraOnLaunchBox.IsChecked = config.VirtualCameraOnLaunch;
 
         for (int i = 0; i < config.Cameras.Count; i++)
         {
@@ -130,6 +131,9 @@ public partial class SettingsWindow : Window
         next.ActiveIndex = Math.Clamp(_pipeline.ActiveIndex, 0, cameras.Count - 1);
         next.StartWithWindows = StartWithWindowsBox.IsChecked == true;
         next.StartMinimized = StartMinimizedBox.IsChecked == true;
+        next.VirtualCameraOnLaunch = VirtualCameraOnLaunchBox.IsChecked == true;
+        // Not a settings control: carry the current runtime preview state through.
+        next.PreviewsEnabled = _pipeline.Config.PreviewsEnabled;
 
         try
         {

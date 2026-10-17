@@ -21,6 +21,7 @@ public sealed class PipelineController : IAsyncDisposable
     public AppConfig Config => _config;
     public bool VirtualCameraActive => _vcamOk;
     public bool CaptureActive => _engine != null;
+    public bool PreviewsActive => _config.PreviewsEnabled;
     public CameraEngine? Engine => _engine;
     public IReadOnlyList<CameraSource> Sources => _engine?.Sources ?? Array.Empty<CameraSource>();
 
@@ -40,6 +41,9 @@ public sealed class PipelineController : IAsyncDisposable
     public event Action? VirtualCameraStateChanged;
     /// <summary>Raised when capture is started or stopped.</summary>
     public event Action? CaptureStateChanged;
+
+    /// <summary>Raised when camera previews are turned on or off.</summary>
+    public event Action? PreviewsStateChanged;
 
     public async Task StartAsync(AppConfig config)
     {
@@ -134,12 +138,42 @@ public sealed class PipelineController : IAsyncDisposable
         VirtualCameraStateChanged?.Invoke();
     }
 
+    /// <summary>
+    /// Turns live camera previews on or off. Off skips the per-frame preview
+    /// downscale (a real CPU saving) while capture and every passthrough virtual
+    /// camera keep running.
+    /// </summary>
+    public void SetPreviewsEnabled(bool enabled)
+    {
+        if (_config.PreviewsEnabled == enabled)
+            return;
+
+        _config.PreviewsEnabled = enabled;
+        if (_engine != null)
+            _engine.PreviewsEnabled = enabled;
+
+        try { ConfigService.Save(_config); } catch (Exception ex) { AppLog.Write($"Previews: save failed {ex.Message}"); }
+
+        AppLog.Write($"Previews: {(enabled ? "on" : "off")}");
+        PreviewsStateChanged?.Invoke();
+    }
+
     public async Task StartCaptureAsync()
     {
         if (_engine != null)
             return;
         AppLog.Write("StartCapture");
         await RebuildPipelineAsync();
+
+        // With auto-start enabled, each hardware camera's virtual camera comes up
+        // with it instead of only at app launch.
+        if (_config.VirtualCameraOnLaunch && !_vcamOk)
+        {
+            _vcamOk = await Task.Run(() => _vcam.Start(_config.Cameras));
+            AppLog.Write($"StartCapture: virtual cameras auto-start {(_vcamOk ? "ok" : "failed")}");
+            VirtualCameraStateChanged?.Invoke();
+        }
+
         RebuildHotkeys();
         SourcesChanged?.Invoke();
         CaptureStateChanged?.Invoke();
@@ -191,7 +225,8 @@ public sealed class PipelineController : IAsyncDisposable
         _switcher = new FramePublisher(Protocol.PipeName, w, h, fps);
 
         var engine = new CameraEngine(_publishers, _switcher);
-        AppLog.Write("Rebuild: engine StartAsync begin");
+        engine.PreviewsEnabled = _config.PreviewsEnabled;
+        AppLog.Write($"Rebuild: engine StartAsync begin (previews={(_config.PreviewsEnabled ? "on" : "off")})");
         await engine.StartAsync(_config);
         AppLog.Write("Rebuild: engine StartAsync end");
         _engine = engine;

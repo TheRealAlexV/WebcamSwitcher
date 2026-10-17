@@ -48,6 +48,13 @@ public sealed class CameraSource : IAsyncDisposable
     /// <summary>Raised with the latest downscaled Bgra8 preview (buffer is reused).</summary>
     public event Action<byte[], int, int>? PreviewReady;
 
+    /// <summary>
+    /// When false, the per-frame preview downscale is skipped entirely (no CPU cost,
+    /// no <see cref="PreviewReady"/>). Capture and virtual-camera publishing are
+    /// unaffected.
+    /// </summary>
+    public bool PreviewEnabled { get; set; } = true;
+
     public CameraSource(string deviceId, string displayName)
     {
         DeviceId = deviceId;
@@ -241,6 +248,9 @@ public sealed class CameraSource : IAsyncDisposable
             preview = _preview;
         }
 
+        // Read once per frame: toggling previews mid-stream must not tear a frame.
+        bool previews = PreviewEnabled;
+
         if (sw.BitmapPixelFormat == BitmapPixelFormat.Nv12)
         {
             // NV12 in → tight NV12 out (stride-aware copy). The Frame Server
@@ -252,17 +262,20 @@ public sealed class CameraSource : IAsyncDisposable
                 CopyNv12Tight(src, w, h, stride, nv12);
                 FrameReady?.Invoke(nv12);
             }
-            ColorConverter.Nv12ToBgra8Downscale(src, w, h, stride, preview, PreviewWidth, PreviewHeight);
+            if (previews)
+                ColorConverter.Nv12ToBgra8Downscale(src, w, h, stride, preview, PreviewWidth, PreviewHeight);
         }
         else
         {
             // Fallback: reader delivered Bgra8 (rare). Legacy conversion path.
             ColorConverter.Bgra8ToNv12(src, w, h, stride, nv12, OutputWidth, OutputHeight);
             FrameReady?.Invoke(nv12);
-            ColorConverter.Bgra8Downscale(src, w, h, stride, preview, PreviewWidth, PreviewHeight);
+            if (previews)
+                ColorConverter.Bgra8Downscale(src, w, h, stride, preview, PreviewWidth, PreviewHeight);
         }
 
-        PreviewReady?.Invoke(preview, PreviewWidth, PreviewHeight);
+        if (previews)
+            PreviewReady?.Invoke(preview, PreviewWidth, PreviewHeight);
     }
 
     private static unsafe void CopyNv12Tight(byte* src, int w, int h, int srcStride, byte[] dst)

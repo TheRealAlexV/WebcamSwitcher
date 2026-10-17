@@ -9,8 +9,9 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto">
-            <ItemsControl x:Name="Previews">
+        <Grid Grid.Row="0">
+            <ScrollViewer x:Name="PreviewScroller" VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="Previews">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                         <WrapPanel/>
@@ -39,18 +40,29 @@
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
-        </ScrollViewer>
+            </ScrollViewer>
 
-        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
-            <TextBlock x:Name="StatusText" Foreground="#CCC" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <TextBlock x:Name="PreviewsOffText" Visibility="Collapsed"
+                       Text="Previews are off. Capture and the virtual cameras are still running."
+                       Foreground="#888" FontSize="14" TextWrapping="Wrap" MaxWidth="420"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center"/>
+        </Grid>
+
+        <StackPanel Grid.Row="1" Margin="0,10,0,0">
+            <TextBlock x:Name="StatusText" Foreground="#CCC" HorizontalAlignment="Center" Margin="0,0,0,8"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
             <Button x:Name="VcamToggle" Content="Virtual Camera: OFF" Padding="10,6" Click="VcamToggle_Click"
                     Background="#333" Foreground="White" Margin="0,0,8,0"
                     AutomationProperties.AutomationId="VcamToggle"/>
             <Button x:Name="CaptureToggle" Content="Cameras: ON" Padding="10,6" Click="CaptureToggle_Click"
                     Background="#333" Foreground="White" Margin="0,0,8,0"
                     AutomationProperties.AutomationId="CaptureToggle"/>
+            <Button x:Name="PreviewsToggle" Content="Previews: ON" Padding="10,6" Click="PreviewsToggle_Click"
+                    Background="#333" Foreground="White" Margin="0,0,8,0"
+                    AutomationProperties.AutomationId="PreviewsToggle"/>
             <Button Content="Settings" Padding="14,6" Click="Settings_Click" Background="#333" Foreground="White"
                     AutomationProperties.AutomationId="SettingsButton"/>
+            </StackPanel>
         </StackPanel>
     </Grid>
 </Window>

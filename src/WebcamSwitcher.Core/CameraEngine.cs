@@ -46,6 +46,24 @@ public sealed class CameraEngine : IAsyncDisposable
         }
     }
 
+    private volatile bool _previewsEnabled = true;
+
+    /// <summary>
+    /// Propagated to every source. When false, per-frame preview downscaling is
+    /// skipped while capture and the passthrough virtual cameras keep running.
+    /// </summary>
+    public bool PreviewsEnabled
+    {
+        get => _previewsEnabled;
+        set
+        {
+            _previewsEnabled = value;
+            // Snapshot: StartAsync may still be assembling sources on its own thread.
+            foreach (var s in _sources.ToArray())
+                s.PreviewEnabled = value;
+        }
+    }
+
     /// <param name="publishers">
     /// Passthrough publishers aligned with <c>config.Cameras</c>: <c>publishers[slot]</c>
     /// serves the continuous feed for camera slot <c>slot</c>.
@@ -85,6 +103,7 @@ public sealed class CameraEngine : IAsyncDisposable
                 continue;
 
             var source = new CameraSource(c.DeviceId, c.FriendlyName);
+            source.PreviewEnabled = _previewsEnabled;
             int slot = i;
             source.FrameReady += nv12 => Publish(slot, nv12, w, h);
             sources[i] = source;

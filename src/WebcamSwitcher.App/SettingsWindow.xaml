@@ -34,7 +34,13 @@
             <Separator Margin="0,4"/>
 
             <CheckBox x:Name="StartWithWindowsBox" Content="Start with Windows" Foreground="White" Margin="0,10,0,4"/>
-            <CheckBox x:Name="StartMinimizedBox" Content="Start minimized to tray" Foreground="White" Margin="0,0,0,16"/>
+            <CheckBox x:Name="StartMinimizedBox" Content="Start minimized to tray" Foreground="White" Margin="0,0,0,4"/>
+            <CheckBox x:Name="VirtualCameraOnLaunchBox"
+                      Content="Start virtual cameras at launch (one passthrough camera per hardware camera)"
+                      Foreground="White" Margin="0,0,0,4"
+                      AutomationProperties.AutomationId="VirtualCameraOnLaunchBox"/>
+            <TextBlock Foreground="#888" Text="When on, every camera's virtual camera starts with capture — including when capture is toggled back on — so other apps can use them immediately."
+                       TextWrapping="Wrap" Margin="0,0,0,16"/>
 
             <TextBlock x:Name="NoteText" Foreground="#888" Margin="0,0,0,12" TextWrapping="Wrap"/>
 

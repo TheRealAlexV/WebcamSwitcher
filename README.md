@@ -70,6 +70,10 @@ requires administrator rights once (to register the media source in `HKLM`).
 - The main window shows **live previews** of both cameras; click a preview (or
   press its hotkey) to make that camera active. The green border marks the
   active camera.
+- Three toggles sit along the bottom of the window: **Virtual Camera** (register
+  or release the virtual cameras), **Cameras** (start or stop capture), and
+  **Previews** (render the thumbnails or hide them to save CPU — capture and the
+  virtual cameras keep running).
 - **Default hotkeys** (configurable in Settings):
   - `Ctrl+Alt+1` — camera 1
   - `Ctrl+Alt+2` — camera 2
@@ -125,7 +129,8 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
   "RotateHotkey": "Ctrl+Alt+N",
   "StartWithWindows": false,
   "StartMinimized": false,
-  "VirtualCameraOnLaunch": true
+  "VirtualCameraOnLaunch": true,
+  "PreviewsEnabled": true
 }
 ```
 
@@ -141,7 +146,12 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
 - `StartWithWindows` — add/remove the app from the per-user startup (Run key).
 - `StartMinimized` — start hidden to the tray.
 - `VirtualCameraOnLaunch` — register the virtual cameras as soon as the app
-  starts (also toggleable at runtime from the main window).
+  starts, and bring them back whenever capture is toggled on (Settings →
+  "Start virtual cameras at launch"). They can still be toggled at runtime from
+  the main window.
+- `PreviewsEnabled` — render the live camera thumbnails (main window →
+  "Previews"). Turning previews off skips the per-frame preview scaling, which
+  saves CPU while capture and every virtual camera keep running.
 
 > The output format is also written to
 > `%ProgramData%\WebcamSwitcher\format.ini` and the virtual-camera → pipe
@@ -158,9 +168,18 @@ powershell -File build.ps1
 ```
 
 This produces a self-contained app in `artifacts/app` (the `.exe` + the
-virtual-camera `WebcamSwitcher.Source.dll`). The installer (Inno Setup) is built
-by CI; run the `.iss` with [Inno Setup](https://jrsoftware.org/isinfo.php) to
-build it locally.
+virtual-camera `WebcamSwitcher.Source.dll`) and re-registers the media source
+with COM. The installer (Inno Setup) is built by CI; run the `.iss` with
+[Inno Setup](https://jrsoftware.org/isinfo.php) to build it locally.
+
+> **Moved or renamed the checkout?** The media source is registered in `HKLM` by
+> *absolute* DLL path, so the old path goes dangling and activating a virtual
+> camera silently does nothing (the log shows `failed hr=0x8007007E`). Running
+> `build.ps1` re-registers it; to fix it by hand, from an **elevated** shell:
+>
+> ```
+> regsvr32 /s "C:\path\to\repo\artifacts\app\WebcamSwitcher.Source.dll"
+> ```
 
 ## Releases & CI
 

@@ -22,6 +22,7 @@ public partial class MainWindow : Window
         _pipeline.SourcesChanged += OnSourcesChanged;
         _pipeline.VirtualCameraStateChanged += OnStateChanged;
         _pipeline.CaptureStateChanged += OnStateChanged;
+        _pipeline.PreviewsStateChanged += OnStateChanged;
 
         RebuildPreviews();
         UpdateToggles();
@@ -33,7 +34,19 @@ public partial class MainWindow : Window
     {
         VcamToggle.Content = _pipeline.VirtualCameraActive ? "Virtual Camera: ON" : "Virtual Camera: OFF";
         CaptureToggle.Content = _pipeline.CaptureActive ? "Cameras: ON" : "Cameras: OFF";
+        PreviewsToggle.Content = _pipeline.PreviewsActive ? "Previews: ON" : "Previews: OFF";
+
+        bool previews = _pipeline.PreviewsActive;
+        PreviewScroller.Visibility = previews ? Visibility.Visible : Visibility.Collapsed;
+        PreviewsOffText.Visibility = previews ? Visibility.Collapsed : Visibility.Visible;
+
         UpdateStatus();
+    }
+
+    private void PreviewsToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _pipeline.SetPreviewsEnabled(!_pipeline.PreviewsActive);
+        UpdateToggles();
     }
 
     private void VcamToggle_Click(object sender, RoutedEventArgs e)

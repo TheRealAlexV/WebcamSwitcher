@@ -31,6 +31,13 @@ public class AppConfig
     /// <summary>Whether the virtual camera is registered/enabled at app launch.</summary>
     public bool VirtualCameraOnLaunch { get; set; }
 
+    /// <summary>
+    /// Whether live camera thumbnails are rendered. Turning this off skips the
+    /// per-frame preview scaling (a measurable CPU saving) while capture and the
+    /// passthrough virtual cameras keep running.
+    /// </summary>
+    public bool PreviewsEnabled { get; set; } = true;
+
     /// <summary>Clamps/repairs values so they are always valid before use.</summary>
     public void Normalize()
     {
