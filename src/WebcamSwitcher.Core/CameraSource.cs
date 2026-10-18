@@ -36,6 +36,37 @@ public sealed class CameraSource : IAsyncDisposable
     private int _fpsWindowFrames;
     private DateTime _fpsWindowStart = DateTime.UtcNow;
 
+    // --- Frame-stall watchdog -------------------------------------------------
+    // WinRT MediaFrameReader delivery can silently stop after a while (observed as
+    // ~0.9 fps with bursts of 75 frames). The pipeline does not notice a dead
+    // reader, so the source now watches its own callback liveness and restarts the
+    // reader/capture pair instead of leaving a frozen camera until the user toggles
+    // capture off and on.
+    private readonly SemaphoreSlim _lifecycle = new(1, 1); // serializes start/stop/recovery
+    private System.Threading.Timer? _watchdog;
+    private long _lastFrameTicks;            // Environment.TickCount64 of the last callback
+    private long _startedTicks;              // when the current reader start completed
+    private long _framesTotal;               // callbacks since the last (re)start
+    private long _stallRecoveries;           // successful restarts (a frame arrived)
+    private long _stallDiagLogged;           // one environment dump per source
+    private int _recovering;                 // 1 while a recovery runs
+    private long _recoveryRestartTicks;      // when the current recovery restart began
+    private long _recoveryFirstFramePending; // 1 until the first frame after a restart
+    private long _recoveryBackoffMs;         // current backoff step, 0 = none
+    private long _nextRecoveryTicks;         // earliest time for the next attempt
+    private int _lastCaptureWidth;           // start arguments, replayed on recovery
+    private int _lastCaptureHeight;
+    private IReadOnlyList<MediaFrameSourceGroup>? _lastGroups;
+    private volatile bool _disposed;
+    private volatile bool _captureDesired; // true while capture should be running (incl. during recovery)
+
+    private const long StallThresholdMs = 2000;
+    private const long StartupGraceMs = 5000;
+    private const long RecoveryFirstFrameTimeoutMs = 5000;
+    private const long MinRecoveryBackoffMs = 2000;
+    private const long MaxRecoveryBackoffMs = 30000;
+    private const int RecoverySettleMs = 300;
+
     public const int PreviewWidth = 320;
     public const int PreviewHeight = 180;
 
@@ -77,6 +108,12 @@ public sealed class CameraSource : IAsyncDisposable
     /// <summary>Subtype actually selected for the capture stream.</summary>
     private string _chosenSubtype = "NV12";
 
+    /// <summary>Successful stall recoveries for this source (a frame arrived after a restart).</summary>
+    public long StallRecoveries => Interlocked.Read(ref _stallRecoveries);
+
+    /// <summary>Frame callbacks received since the current capture was started.</summary>
+    public long FramesReceived => Interlocked.Read(ref _framesTotal);
+
     public CameraSource(string deviceId, string displayName)
     {
         DeviceId = deviceId;
@@ -86,6 +123,42 @@ public sealed class CameraSource : IAsyncDisposable
     public async Task<bool> StartAsync(int outWidth, int outHeight, int captureWidth = 0, int captureHeight = 0,
         IReadOnlyList<MediaFrameSourceGroup>? groups = null)
     {
+        // Serialized with the watchdog and DisposeAsync: a recovery restart must
+        // never run concurrently with a user-initiated start/stop.
+        await _lifecycle.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Remember the arguments so the watchdog can replay this exact start.
+            _lastCaptureWidth = captureWidth;
+            _lastCaptureHeight = captureHeight;
+            _lastGroups = groups;
+            _disposed = false;
+
+            // A user-initiated start is not a recovery: clear any recovery state.
+            Interlocked.Exchange(ref _recoveryFirstFramePending, 0);
+            Volatile.Write(ref _recoveryRestartTicks, 0);
+            Interlocked.Exchange(ref _recoveryBackoffMs, 0);
+            Volatile.Write(ref _nextRecoveryTicks, 0);
+
+            _captureDesired = true;
+            bool ok = await StartCoreAsync(outWidth, outHeight, captureWidth, captureHeight, groups).ConfigureAwait(false);
+            if (!ok)
+                _captureDesired = false;
+            return ok;
+        }
+        finally
+        {
+            _lifecycle.Release();
+        }
+    }
+
+    /// <summary>
+    /// The actual start path. Callers must hold <see cref="_lifecycle"/>; the
+    /// watchdog recovery re-enters here after tearing the old capture down.
+    /// </summary>
+    private async Task<bool> StartCoreAsync(int outWidth, int outHeight, int captureWidth, int captureHeight,
+        IReadOnlyList<MediaFrameSourceGroup>? groups)
+    {
         OutputWidth = outWidth;
         OutputHeight = outHeight;
         _nv12 = new byte[Protocol.Nv12Size(outWidth, outHeight)];
@@ -93,6 +166,9 @@ public sealed class CameraSource : IAsyncDisposable
         // A restart must not inherit "a frame already arrived" from the last run.
         Interlocked.Exchange(ref _framesArrived, 0);
         Interlocked.Exchange(ref _firstFrameLogged, 0);
+        // ... nor liveness for the watchdog.
+        Interlocked.Exchange(ref _framesTotal, 0);
+        Volatile.Write(ref _lastFrameTicks, Environment.TickCount64);
 
         AppLog.Write($"Source.StartAsync({DisplayName}): finding group");
         // Callers may pass a pre-enumerated list so N cameras don't each perform
@@ -189,6 +265,10 @@ public sealed class CameraSource : IAsyncDisposable
 
         AppLog.Write($"Source.StartAsync({DisplayName}): reader started");
         Running = true;
+        // The watchdog only starts once the reader is up: startup itself can
+        // legitimately take seconds (format switch, decode probe).
+        Volatile.Write(ref _startedTicks, Environment.TickCount64);
+        StartWatchdog();
         return true;
     }
 
@@ -520,10 +600,207 @@ public sealed class CameraSource : IAsyncDisposable
         return Volatile.Read(ref _framesArrived) > 0;
     }
 
+    // --- Stall watchdog -------------------------------------------------------
+
+    private void StartWatchdog()
+    {
+        if (_watchdog == null)
+            _watchdog = new System.Threading.Timer(OnWatchdogTick, null, 1000, 1000);
+    }
+
+    private void StopWatchdog()
+    {
+        var timer = _watchdog;
+        _watchdog = null;
+        if (timer != null)
+        {
+            try { timer.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Runs once per second while a capture is wanted. Cheap: a few volatile reads
+    /// and no allocation unless the frame stream has actually gone quiet. The
+    /// recovery itself is fire-and-forget so this callback never blocks a pool
+    /// thread on I/O.
+    /// </summary>
+    private void OnWatchdogTick(object? state)
+    {
+        if (_disposed || !_captureDesired)
+            return;
+
+        try
+        {
+            long now = Environment.TickCount64;
+            if (!IsStalled(now, out _))
+                return;
+            if (now < Volatile.Read(ref _nextRecoveryTicks))
+                return;
+            if (Interlocked.CompareExchange(ref _recovering, 1, 0) != 0)
+                return;
+
+            _ = RecoverFromStallAsync();
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref _recovering, 0);
+            AppLog.Write($"Source({DisplayName}): watchdog tick threw {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Stall rule: no callback for more than 2s, at least one callback since the
+    /// last (re)start, and more than 5s since that start (startup grace). A
+    /// recovery restart that never delivered a frame counts as stalled too, so
+    /// the backoff can retry it.
+    /// </summary>
+    private bool IsStalled(long now, out long stalledMs)
+    {
+        stalledMs = now - Volatile.Read(ref _lastFrameTicks);
+        bool awaitingFirstFrame = Volatile.Read(ref _recoveryFirstFramePending) == 1;
+
+        if (_reader == null && !awaitingFirstFrame)
+            return false;
+        if (!awaitingFirstFrame && Volatile.Read(ref _framesTotal) <= 0)
+            return false; // nothing has ever arrived: still starting, not stalled
+
+        long sinceStart = awaitingFirstFrame
+            ? now - Volatile.Read(ref _recoveryRestartTicks)
+            : now - Volatile.Read(ref _startedTicks);
+        long grace = awaitingFirstFrame ? RecoveryFirstFrameTimeoutMs : StartupGraceMs;
+        if (sinceStart <= grace)
+            return false;
+
+        return stalledMs > StallThresholdMs;
+    }
+
+    /// <summary>
+    /// Restarts this source's capture after a stall. Never throws out (the timer
+    /// runs on a pool thread and must not take the process down); every failure is
+    /// logged and retried with backoff.
+    /// </summary>
+    private async Task RecoverFromStallAsync()
+    {
+        try
+        {
+            await _lifecycle.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_disposed || !_captureDesired)
+                    return;
+                if (!IsStalled(Environment.TickCount64, out long stalledMs))
+                    return;
+
+                if (Interlocked.Exchange(ref _stallDiagLogged, 1) == 0)
+                    AppLog.Write($"Source({DisplayName}): stall diagnostics - readerMode=Realtime, mediaCaptureNull={_capture is null}, gcHeapMB={GC.GetTotalMemory(false) / 1048576}");
+
+                AppLog.Write($"Source({DisplayName}): STALL - no frame for {stalledMs / 1000.0:0.0}s (frames={Interlocked.Read(ref _framesTotal)}, nulls={Volatile.Read(ref _nullFrames)}, recoveries={Interlocked.Read(ref _stallRecoveries)}); restarting capture");
+
+                // Escalating backoff (2s, 4s, 8s ... capped at 30s) so a camera
+                // that cannot be reopened is retried, not hammered.
+                long backoff = Math.Min(
+                    Math.Max(Interlocked.Read(ref _recoveryBackoffMs) * 2, MinRecoveryBackoffMs),
+                    MaxRecoveryBackoffMs);
+                Interlocked.Exchange(ref _recoveryBackoffMs, backoff);
+                Volatile.Write(ref _nextRecoveryTicks, Environment.TickCount64 + backoff);
+
+                await StopReaderAsync().ConfigureAwait(false);
+                // Let the USB device / Frame Server release the handle before reopening.
+                await Task.Delay(RecoverySettleMs).ConfigureAwait(false);
+
+                _captureDesired = true;
+                Interlocked.Exchange(ref _recoveryFirstFramePending, 1);
+                Volatile.Write(ref _recoveryRestartTicks, Environment.TickCount64);
+
+                bool ok;
+                try
+                {
+                    ok = await StartCoreAsync(OutputWidth, OutputHeight, _lastCaptureWidth, _lastCaptureHeight, _lastGroups)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    AppLog.Write($"Source({DisplayName}): STALL recovery restart threw {ex.GetType().Name}: {ex.Message}");
+                }
+
+                if (!ok)
+                {
+                    // Keep "awaiting first frame" set so the watchdog retries after
+                    // the backoff instead of giving up on a dead camera.
+                    AppLog.Write($"Source({DisplayName}): STALL recovery failed; next attempt in {backoff / 1000}s");
+                }
+            }
+            finally
+            {
+                _lifecycle.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"Source({DisplayName}): STALL recovery threw {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _recovering, 0);
+        }
+    }
+
+    /// <summary>
+    /// Tears down the reader and MediaCapture so a fresh pair can be created.
+    /// Logs and swallows failures: a half-dead reader must not abort recovery.
+    /// </summary>
+    private async Task StopReaderAsync()
+    {
+        var reader = _reader;
+        var capture = _capture;
+        _reader = null;
+        _capture = null;
+        Running = false;
+
+        if (reader != null)
+        {
+            try { reader.FrameArrived -= OnFrameArrived; } catch { }
+            try { await reader.StopAsync(); }
+            catch (Exception ex) { AppLog.Write($"Source({DisplayName}): STALL stop reader threw {ex.GetType().Name}: {ex.Message}"); }
+            try { reader.Dispose(); }
+            catch (Exception ex) { AppLog.Write($"Source({DisplayName}): STALL dispose reader threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        if (capture != null)
+        {
+            try { capture.Dispose(); }
+            catch (Exception ex) { AppLog.Write($"Source({DisplayName}): STALL dispose MediaCapture threw {ex.GetType().Name}: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>First frame after a recovery restart: clear backoff and log it.</summary>
+    private void OnRecoveredFirstFrame()
+    {
+        Interlocked.Exchange(ref _recoveryBackoffMs, 0);
+        Volatile.Write(ref _nextRecoveryTicks, 0);
+        long took = Math.Max(0, Environment.TickCount64 - Volatile.Read(ref _recoveryRestartTicks));
+        Volatile.Write(ref _recoveryRestartTicks, 0);
+        long recoveries = Interlocked.Increment(ref _stallRecoveries);
+        AppLog.Write($"Source({DisplayName}): STALL recovered - first frame after {took}ms (recoveries={recoveries})");
+    }
+
     private void OnFrameArrived(MediaFrameReader sender, MediaFrameArrivedEventArgs args)
     {
+        // Liveness for the stall watchdog: no allocation, no logging on the hot path.
+        Interlocked.Increment(ref _framesTotal);
+        Volatile.Write(ref _lastFrameTicks, Environment.TickCount64);
+        if (Volatile.Read(ref _recoveryFirstFramePending) == 1 &&
+            Interlocked.Exchange(ref _recoveryFirstFramePending, 0) == 1)
+            OnRecoveredFirstFrame();
+
         using var frame = sender.TryAcquireLatestFrame();
-        var sw = frame?.VideoMediaFrame?.SoftwareBitmap;
+        // Disposing the SoftwareBitmap is REQUIRED, not optional: accessing it creates a
+        // strong reference the runtime counts against a per-process allocation cap, and
+        // Microsoft documents that exceeding that cap makes "the flow of new frames stop"
+        // until the GC happens to free some. That is exactly the observed symptom (a slow
+        // trickle of frames, both cameras at once, temporary recovery after a restart).
+        using var sw = frame?.VideoMediaFrame?.SoftwareBitmap;
         if (sw == null)
         {
             if ((Interlocked.Increment(ref _nullFrames) & 0x3F) == 1)
@@ -533,15 +810,15 @@ public sealed class CameraSource : IAsyncDisposable
         if (Interlocked.Exchange(ref _firstFrameLogged, 1) == 0)
             AppLog.Write($"Source({DisplayName}): first frame {sw.PixelWidth}x{sw.PixelHeight} {sw.BitmapPixelFormat}");
         Interlocked.Increment(ref _framesArrived);
-        if (++_fpsWindowFrames >= 75)
+        _fpsWindowFrames++;
+        // Time-based window: the old code only emitted once 75 frames had piled up, so a
+        // stalled camera logged "75 frames in 81.0s" and hid the stall for minutes.
+        double secs = (DateTime.UtcNow - _fpsWindowStart).TotalSeconds;
+        if (secs >= 4.0)
         {
-            double secs = (DateTime.UtcNow - _fpsWindowStart).TotalSeconds;
-            if (secs >= 4)
-            {
-                AppLog.Write($"Source({DisplayName}): {_fpsWindowFrames} frames in {secs:0.0}s = {_fpsWindowFrames / secs:0.0} fps");
-                _fpsWindowStart = DateTime.UtcNow;
-                _fpsWindowFrames = 0;
-            }
+            AppLog.Write($"Source({DisplayName}): {_fpsWindowFrames} frames in {secs:0.0}s = {_fpsWindowFrames / secs:0.0} fps");
+            _fpsWindowStart = DateTime.UtcNow;
+            _fpsWindowFrames = 0;
         }
 
         try
@@ -630,6 +907,25 @@ public sealed class CameraSource : IAsyncDisposable
     }
 
     public async ValueTask DisposeAsync()
+    {
+        // Serialized with StartAsync and the watchdog recovery so a restart cannot
+        // resurrect a source that is being disposed.
+        await _lifecycle.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _disposed = true;
+            _captureDesired = false;
+            Interlocked.Exchange(ref _recoveryFirstFramePending, 0);
+            StopWatchdog();
+            await DisposeCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _lifecycle.Release();
+        }
+    }
+
+    private async ValueTask DisposeCoreAsync()
     {
         if (_mf != null)
         {
