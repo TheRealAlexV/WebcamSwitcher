@@ -11,4 +11,10 @@
   <ItemGroup>
     <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Diagnostic harness only (tools/MfProbe): lets it drive the reference
+         scalar conversion as the byte-identity oracle. Not part of the app. -->
+        <InternalsVisibleTo Include="WebcamSwitcher.MfProbe" />
+    <InternalsVisibleTo Include="WebcamSwitcher.VcamTest" />
+  </ItemGroup>
 </Project>

@@ -20,6 +20,23 @@ public class CameraConfig
     /// 30 fps at 720p/1080p.
     /// </summary>
     public string CaptureFormat { get; set; } = "Auto";
+
+    /// <summary>
+    /// Whether this camera's passthrough virtual camera is created at launch and
+    /// by the global virtual-camera toggle. Defaults to true; turning it off
+    /// stops exactly this slot and leaves the others running. The friendly name
+    /// and pipe of every slot are computed regardless, so this slot can be
+    /// started later without a restart and never renames its neighbours.
+    /// </summary>
+    public bool VirtualCameraEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Extra video delay for this camera, in milliseconds (default 0, i.e. no
+    /// delay at all). Added to <see cref="AppConfig.CommonDelayMs"/> before it is
+    /// converted to frames, so a camera that is consistently ahead of the others
+    /// can be lined up with them. 0 costs nothing: the delay stage is bypassed.
+    /// </summary>
+    public int DelayMs { get; set; }
 }
 
 public class AppConfig
@@ -36,8 +53,20 @@ public class AppConfig
     public bool StartWithWindows { get; set; }
     public bool StartMinimized { get; set; }
 
-    /// <summary>Whether the virtual camera is registered/enabled at app launch.</summary>
+    /// <summary>
+    /// Legacy master switch, kept for config compatibility only. Virtual cameras
+    /// now start from the per-slot flags (<see cref="SwitcherVirtualCameraEnabled"/>
+    /// and <see cref="CameraConfig.VirtualCameraEnabled"/>), so this value is no
+    /// longer consulted anywhere.
+    /// </summary>
     public bool VirtualCameraOnLaunch { get; set; }
+
+    /// <summary>
+    /// Whether the switcher virtual camera ("WebcamSwitcher Virtual Camera") is
+    /// created at launch and by the global toggle. Defaults to true and is
+    /// independent of the per-camera <see cref="CameraConfig.VirtualCameraEnabled"/>.
+    /// </summary>
+    public bool SwitcherVirtualCameraEnabled { get; set; } = true;
 
     /// <summary>
     /// Whether live camera thumbnails are rendered. Turning this off skips the
@@ -47,11 +76,28 @@ public class AppConfig
     public bool PreviewsEnabled { get; set; } = true;
 
     /// <summary>
+    /// Whether the cameras are capturing. Persisted so quitting with capture off
+    /// does not silently start the cameras again on the next launch.
+    /// </summary>
+    public bool CaptureEnabled { get; set; } = true;
+
+    /// <summary>
     /// When on, each camera's exposure is pinned to manual 1/30 s so a dim scene
     /// cannot make the camera lengthen integration time and drop to 15 fps. The
     /// image may be darker in low light; that is the accepted tradeoff.
     /// </summary>
     public bool PreferSmooth30Fps { get; set; }
+
+    /// <summary>
+    /// Video delay applied to every camera, in milliseconds (default 0, i.e. no
+    /// delay at all). Each camera adds its own <see cref="CameraConfig.DelayMs"/>
+    /// to this, so the common value sets the baseline latency and the per-camera
+    /// value lines up the odd camera out. 0 bypasses the delay stage entirely.
+    /// </summary>
+    public int CommonDelayMs { get; set; }
+
+    /// <summary>Largest accepted delay; 2 s is far more than A/V sync needs.</summary>
+    public const int MaxDelayMs = 2000;
 
     /// <summary>Clamps/repairs values so they are always valid before use.</summary>
     public void Normalize()
@@ -59,6 +105,10 @@ public class AppConfig
         Width = ClampEven(Width, Protocol.DefaultWidth);
         Height = ClampEven(Height, Protocol.DefaultHeight);
         Fps = Math.Clamp(Fps, 1, 60);
+
+        CommonDelayMs = Math.Clamp(CommonDelayMs, 0, MaxDelayMs);
+        foreach (var camera in Cameras)
+            camera.DelayMs = Math.Clamp(camera.DelayMs, 0, MaxDelayMs);
 
         int count = Cameras.Count;
         if (Hotkeys == null)
@@ -71,6 +121,10 @@ public class AppConfig
         }
 
         ActiveIndex = Math.Clamp(ActiveIndex, 0, Math.Max(0, count - 1));
+
+        // The two virtual-camera switches are plain booleans with a "keep it
+        // stable" contract: Normalize never rewrites them, so a slot the user
+        // turned off stays off across saves, reloads and launches.
     }
 
     private static int ClampEven(int v, int def)

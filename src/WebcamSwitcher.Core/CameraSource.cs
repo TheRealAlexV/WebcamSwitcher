@@ -88,7 +88,13 @@ public sealed class CameraSource : IAsyncDisposable
     /// no <see cref="PreviewReady"/>). Capture and virtual-camera publishing are
     /// unaffected.
     /// </summary>
-    public bool PreviewEnabled { get; set; } = true;
+    public bool PreviewEnabled
+    {
+        get => Volatile.Read(ref _previewEnabled);
+        set => Volatile.Write(ref _previewEnabled, value);
+    }
+
+    private bool _previewEnabled = true;
 
     /// <summary>
     /// When true, exposure is pinned to manual 1/30 s after the reader starts so
@@ -107,6 +113,12 @@ public sealed class CameraSource : IAsyncDisposable
 
     /// <summary>Subtype actually selected for the capture stream.</summary>
     private string _chosenSubtype = "NV12";
+
+    /// <summary>
+    /// Configured output rate. Only used to describe the MF output type; the rate
+    /// itself is whatever the camera delivers (the pipes are drop-latest).
+    /// </summary>
+    public int CaptureFps { get; set; } = Protocol.DefaultFps;
 
     /// <summary>Successful stall recoveries for this source (a frame arrived after a restart).</summary>
     public long StallRecoveries => Interlocked.Read(ref _stallRecoveries);
@@ -384,7 +396,7 @@ public sealed class CameraSource : IAsyncDisposable
     /// </summary>
     private async Task<bool> TryStartMfMjpegAsync()
     {
-        MfMjpegSource? mf = new MfMjpegSource(DeviceId, DisplayName, OutputWidth, OutputHeight);
+        MfMjpegSource? mf = new MfMjpegSource(DeviceId, DisplayName, OutputWidth, OutputHeight, CaptureFps);
         mf.FrameReady += OnMfFrameReady;
 
         try

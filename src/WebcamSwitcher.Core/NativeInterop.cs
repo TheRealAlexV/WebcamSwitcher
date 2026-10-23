@@ -21,6 +21,23 @@ public static class NativeInterop
     public const uint PipeReadmodeByte = 0x0;
     public const uint PipeWait = 0x0;
     public const uint PipeUnlimitedInstances = 255;
+    public const uint FileFlagOverlapped = 0x40000000;
+
+    public const int ErrorIoPending = 997;
+    public const int ErrorPipeConnected = 535;
+    public const int ErrorBrokenPipe = 109;
+    public const int ErrorNoData = 232;
+    public const int ErrorTimeout = 121;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct OVERLAPPED
+    {
+        public IntPtr Internal;
+        public IntPtr InternalHigh;
+        public uint Offset;
+        public uint OffsetHigh;
+        public IntPtr hEvent;
+    }
 
     public const uint GenericRead = 0x80000000;
     public const uint FileShareRead = 0x1;
@@ -41,7 +58,13 @@ public static class NativeInterop
     public static extern bool ConnectNamedPipe(IntPtr pipe, IntPtr overlapped);
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool WriteFile(IntPtr file, byte[] buffer, uint count, out uint written, IntPtr overlapped);
+    public static extern bool WriteFile(IntPtr file, IntPtr buffer, uint count, IntPtr bytesWritten, IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetOverlappedResult(IntPtr file, IntPtr overlapped, out uint transferred, bool wait);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CancelIoEx(IntPtr file, IntPtr overlapped);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool DisconnectNamedPipe(IntPtr pipe);

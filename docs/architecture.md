@@ -11,7 +11,7 @@ instant switching via global hotkeys.
  ┌──────────┐  ┌──────────┐        ┌─────────────────────────────────────────────────────┐
  │ Cam A    │  │ Cam B    │        │ CameraPipeline A ─┐                                  │
  └────┬─────┘  └────┬─────┘        │ CameraPipeline B ─┼─▶ ActiveCamSelector              │
-      │  MF source reader (SHARE mode, non-blocking)     │        │                     │
+      │  MediaCapture / MF reader (exclusive control)            │                       │
       └─────────┬───┘             │              VideoProcessor MFT ─▶ 1080p30 NV12     │
                 │                 │                              │                       │
                 │                 │                     FramePublisher ──▶ Named-pipe server
@@ -27,7 +27,7 @@ instant switching via global hotkeys.
                 │                                        ▼
                 │                  Consumer apps (Zoom/Teams/OBS)  +  NVIDIA Broadcast
                 │                     (Broadcast consumes our VCam as a camera input)
-                └── other apps can still use the physical cams directly (share mode)
+                └── while capturing, a physical cam is held exclusively by WebcamSwitcher
 ```
 
 ## Components
@@ -39,7 +39,7 @@ instant switching via global hotkeys.
   It is registered in `HKLM` via `regsvr32` (one-time, admin).
 
 - **`WebcamSwitcher.App`** — C# (.NET 9) WPF app. Captures both physical cameras
-  in non-blocking share mode, normalizes the active camera via the Video
+  under exclusive control, normalizes the active camera via the Video
   Processor MFT, publishes frames over the named pipe, and hosts the tray icon,
   global hotkeys, settings, and live previews. It also calls
   `MFCreateVirtualCamera` with **Session** lifetime so the virtual camera exists
@@ -66,18 +66,39 @@ A named pipe (rather than `Global\` shared memory) is used because it requires
 no special privileges — a standard user process can create and serve it, while
 `Global\` object creation needs `SeCreateGlobalPrivilege`.
 
-## Non-blocking capture
+## Video delay (A/V sync)
 
-Both physical cameras are opened in **sharing mode** so other applications can
-still open the same cameras exclusively:
+`CameraEngine` runs every arriving frame through the slot's `FrameDelayBuffer`
+before it is published — ahead of both the slot's passthrough pipe and the
+switcher pipe — so every virtual camera this app exposes can present the same,
+operator-controlled latency and switching sources in OBS never shifts A/V sync.
 
-- `MF_DEVSOURCE_ATTRIBUTE_FRAMESERVER_SHARE_MODE = 1` (Windows 11 build 26100+)
-  via the Media Foundation device source, or
-- WinRT `MediaCapture` with `MediaCaptureSharingMode.SharedReadOnly`.
+The ring holds `round((DelayMs + CommonDelayMs) × fps / 1000)` NV12 copies (0-60
+frames, 0 by default). Depth 0 is a complete bypass: no allocation, no copy, so
+an unconfigured install behaves exactly as before. The stage is **content only**:
+it changes which frame is published, never the sample timing of the native
+source, whose `MediaStream` keeps its own monotonic `SetSampleTime` clock — the
+delay cannot touch the virtual camera's stream contract. While a ring is filling
+(fewer frames than its depth, including right after a depth increase) it reports
+"publish the newest frame", so it can never stall a virtual camera; once full it
+is strict FIFO with one buffer in and one out, no per-frame allocation. The
+switch from "newest" to "depth frames ago" is a single rewind of up to the delay
+length when a ring fills — a one-off on enable, not a running cost.
 
-A sharing-mode source cannot reconfigure the camera, so the app consumes the
-camera's native format and normalizes it itself (Video Processor MFT → NV12
-1080p30).
+## Device capture mode
+
+Each physical camera is opened with WinRT `MediaCapture` in **exclusive control**
+(`MediaCaptureSharingMode.ExclusiveControl`, see `CameraSource.StartAsync`); the
+Media Foundation source-reader path used for MJPG sets no share-mode attribute
+either. The app needs control of the device — it selects the capture format,
+pins exposure and reads frames from the frame reader — so a camera that
+WebcamSwitcher is capturing cannot be opened directly by another application at
+the same time. The supported way to hand a physical camera to Zoom, Teams or OBS
+is its passthrough virtual camera (or the switcher virtual camera for the active
+one).
+
+The app therefore consumes the camera's native mode and normalizes it itself
+(Video Processor MFT → NV12 1080p30).
 
 ## Key findings from the feasibility spike (M0)
 

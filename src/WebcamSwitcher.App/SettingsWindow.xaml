@@ -31,6 +31,12 @@
             <TextBlock Text="Rotate hotkey" Foreground="#CCC" Margin="0,0,0,6"/>
             <TextBox x:Name="RotateHotkeyBox" Width="130" HorizontalAlignment="Left" Margin="0,0,0,16" AutomationProperties.AutomationId="RotateHotkeyBox"/>
 
+            <TextBlock Text="Common video delay (ms)" Foreground="#CCC" Margin="0,0,0,6"/>
+            <TextBox x:Name="CommonDelayBox" Width="90" HorizontalAlignment="Left" Margin="0,0,0,6"
+                     AutomationProperties.AutomationId="CommonDelayBox"/>
+            <TextBlock Foreground="#888" TextWrapping="Wrap" Margin="0,0,0,16"
+                       Text="Added to every camera (0-2000 ms) so switching in OBS never shifts A/V sync. Each camera's own delay is added on top. 0 turns the delay stage off completely. Changes take effect immediately; Apply saves them."/>
+
             <Separator Margin="0,4"/>
 
             <CheckBox x:Name="StartWithWindowsBox" Content="Start with Windows" Foreground="White" Margin="0,10,0,4"/>

@@ -10,8 +10,9 @@ virtual cameras work as normal webcam inputs in Zoom, Teams, OBS, browsers, and
 ## How it works
 
 1. `WebcamSwitcher.App` (WPF, runs in your user session) captures **all
-   configured cameras simultaneously in non-blocking share mode** — other apps
-   can keep using the same cameras.
+   configured cameras simultaneously**. WinRT `MediaCapture` takes **exclusive
+   control** of each device, so other apps reach a physical camera through its
+   virtual camera below rather than by opening the hardware themselves.
 2. Every camera's frames are normalized to a fixed format (default
    **1920x1080 @ 30fps NV12**) and published to its **own** named pipe. Each
    physical camera therefore stays continuously available as its own virtual
@@ -38,13 +39,17 @@ virtual cameras work as normal webcam inputs in Zoom, Teams, OBS, browsers, and
 - **One switchable virtual camera**, named
   `WebcamSwitcher Virtual Camera`, carrying whichever camera is currently
   active. This is the one you normally select in conferencing apps.
-- All of them are registered on launch when **Start virtual camera on launch**
-  is enabled (`VirtualCameraOnLaunch`).
+- Each one switches independently and its state is **remembered across
+  restarts**:
+  - the **Virtual Camera** button in the main window owns the *switcher* only;
+  - every preview tile has its own small switch that owns that camera's
+    *passthrough* camera.
+  Turning one off never disturbs the others, and the app comes back up with the
+  same set running.
 
 ## Requirements
 
-- **Windows 11** (build 22000+ for the virtual camera; build 26100+ recommended
-  for non-blocking share mode).
+- **Windows 11** (build 22000+ for the virtual camera).
 - x64 CPU.
 - No code-signing certificate or kernel driver is required — the virtual camera
   is a user-mode Media Foundation media source.
@@ -70,10 +75,13 @@ requires administrator rights once (to register the media source in `HKLM`).
 - The main window shows **live previews** of both cameras; click a preview (or
   press its hotkey) to make that camera active. The green border marks the
   active camera.
-- Three toggles sit along the bottom of the window: **Virtual Camera** (register
-  or release the virtual cameras), **Cameras** (start or stop capture), and
-  **Previews** (render the thumbnails or hide them to save CPU — capture and the
-  virtual cameras keep running).
+- Three toggles sit along the bottom of the window: **Virtual Camera** (start or
+  stop the **switcher** virtual camera only), **Cameras** (start or stop
+  capture), and **Previews** (render the thumbnails or hide them to save CPU —
+  capture and the virtual cameras keep running). Each preview tile also carries
+  its own switch for that camera's **passthrough** virtual camera.
+- Every one of those switches is persisted: capture, previews, the switcher and
+  each passthrough camera come back exactly as you left them.
 - **Default hotkeys** (configurable in Settings):
   - `Ctrl+Alt+1` — camera 1
   - `Ctrl+Alt+2` — camera 2
@@ -121,17 +129,19 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
   "Height": 1080,
   "Fps": 30,
   "Cameras": [
-    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "HD Pro Webcam C920", "CaptureFormat": "Auto" },
-    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "OsmoPocket3" }
+    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "HD Pro Webcam C920", "CaptureFormat": "Auto", "DelayMs": 0, "VirtualCameraEnabled": true },
+    { "DeviceId": "\\\\?\\USB#...\\GLOBAL", "FriendlyName": "OsmoPocket3", "DelayMs": 0 }
   ],
   "ActiveIndex": 0,
   "Hotkeys": [ "Ctrl+Alt+1", "Ctrl+Alt+2" ],
   "RotateHotkey": "Ctrl+Alt+N",
   "StartWithWindows": false,
   "StartMinimized": false,
-  "VirtualCameraOnLaunch": true,
+  "CaptureEnabled": true,
+  "SwitcherVirtualCameraEnabled": true,
   "PreviewsEnabled": true,
-  "PreferSmooth30Fps": false
+  "PreferSmooth30Fps": false,
+  "CommonDelayMs": 0
 }
 ```
 
@@ -147,6 +157,21 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
   stream produces no frames, the app logs why and falls back to uncompressed
   automatically rather than leaving the camera dark. Set it from Settings →
   Format, per camera.
+- `DelayMs` (per camera, 0-2000 ms, default 0) and `CommonDelayMs` (global,
+  0-2000 ms, default 0) — an operator-controlled video delay. Every frame passes
+  through a fixed FIFO before it reaches a camera's passthrough pipe and the
+  switcher pipe, so all virtual cameras this app exposes can present the same
+  latency and switching between them in OBS never shifts A/V sync. A slot's depth
+  is `round((DelayMs + CommonDelayMs) × Fps / 1000)` frames (capped at 60, i.e.
+  2 s). Each buffered frame is one full NV12 copy (≈3 MB at 1080p), so the
+  memory cost per camera is at most `(depth + 1) × frame size` and is released
+  again as soon as the delay is lowered or set to 0. `0` is a complete bypass: nothing is allocated and no frame is copied, so
+  an existing configuration behaves exactly as before. Both values apply live —
+  the engine is never rebuilt and the virtual cameras are not restarted. Raising
+  a delay means the ring has to fill: until it does, the newest frame is
+  presented immediately (so the virtual camera cannot stall), which costs one
+  one-off rewind of up to the delay length at the moment the ring becomes full.
+  Lowering it or setting 0 is immediate.
 - `Width` / `Height` / `Fps` — the virtual cameras' output format (default
   1920x1080 @ 30fps). Source frames are scaled to this.
 - `Hotkeys` — one per camera, in order. Format: `Modifier+Modifier+Key`
@@ -154,10 +179,20 @@ They are stored in `%APPDATA%\WebcamSwitcher\config.json`:
 - `RotateHotkey` — a single key that cycles through all cameras.
 - `StartWithWindows` — add/remove the app from the per-user startup (Run key).
 - `StartMinimized` — start hidden to the tray.
-- `VirtualCameraOnLaunch` — register the virtual cameras as soon as the app
-  starts, and bring them back whenever capture is toggled on (Settings →
-  "Start virtual cameras at launch"). They can still be toggled at runtime from
-  the main window.
+- `CaptureEnabled` — whether the cameras were capturing. Saved on every
+  start/stop so the app reopens in the same state instead of always capturing.
+- `SwitcherVirtualCameraEnabled` — whether `WebcamSwitcher Virtual Camera` was
+  running. Owned by the main window's **Virtual Camera** button.
+- `VirtualCameraEnabled` (per camera, default `true`) — whether that camera's
+  passthrough virtual camera was running. Owned by the switch on its preview
+  tile. `false` means the device is not registered at all, so it disappears from
+  other apps' camera lists until switched back on.
+- `PreviewsEnabled` — whether the preview thumbnails render. Saving CPU this way
+  leaves capture and every virtual camera untouched.
+- `PreferSmooth30Fps` — pins exposure to at most 1/30 s so a dim scene cannot
+  drop the camera to 15 fps. The image may be darker in low light.
+- `VirtualCameraOnLaunch` — **obsolete**, kept only so older config files still
+  load. The per-slot flags above now decide what starts.
 - `PreviewsEnabled` — render the live camera thumbnails (main window →
   "Previews"). Turning previews off skips the per-frame preview scaling, which
   saves CPU while capture and every virtual camera keep running.
@@ -231,6 +266,10 @@ tag. Any further tag on `main` produces a new release the same way.
 - `tools/SmokeTest`, `tools/CaptureTest`, and `tools/FormatApplyTest` cover the
   virtual-camera registration, cross-session pipe, capture/normalization, and
   format-change paths headlessly.
+- `tools/MfProbe --delaytest` unit-tests `FrameDelayBuffer` without cameras or
+  pipes: depth-0 bypass (including zero allocation), the filling ramp emitting
+  the newest frame, strict FIFO, live resize up and down, the memory bound, and
+  a configure-while-pushing race.
 
 ## Project layout
 

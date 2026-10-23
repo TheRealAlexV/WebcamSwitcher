@@ -24,6 +24,8 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
     private readonly string _name;
     private readonly int _outWidth;
     private readonly int _outHeight;
+    private readonly int _fpsNum;
+    private readonly int _fpsDen;
 
     private IMFSourceReader? _reader;
     private IMFMediaSource? _source;
@@ -33,18 +35,50 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
     private int _copyErrors;
     private long _framesRead;
     private int _stride;
+    private int _lastSampleBytes;
+    private string _negotiationPath = "none";
     private byte[] _frame = Array.Empty<byte>();
 
-    public MfMjpegSource(string deviceId, string name, int width, int height)
+    /// <summary>
+    /// When true (default) the reader is first opened with
+    /// MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING so MF decodes, scales and
+    /// converts to NV12; when that fails the reader is reopened without it. Set to
+    /// false to force the decoder-only path (diagnostics only; the frame contract
+    /// is identical).
+    /// </summary>
+    public bool PreferAdvancedVideoProcessing { get; set; } = true;
+
+    public MfMjpegSource(string deviceId, string name, int width, int height, int fps = Protocol.DefaultFps)
     {
         _deviceId = deviceId;
         _name = name;
         _outWidth = width;
         _outHeight = height;
+        _fpsNum = fps > 0 ? Math.Clamp(fps, 1, 120) : Protocol.DefaultFps;
+        _fpsDen = 1;
     }
 
     public int OutputWidth => _outWidth;
     public int OutputHeight => _outHeight;
+
+    /// <summary>
+    /// How the NV12 output type was negotiated: <c>"advanced"</c> (source reader
+    /// with MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, i.e. Media
+    /// Foundation decodes, scales and converts in the video processor),
+    /// <c>"legacy"</c> (decoder only, the pre-existing path) or <c>"none"</c>
+    /// (no MF path; the caller uses WinRT capture and software conversion).
+    /// Diagnostics only - the frame contract is the same for both.
+    /// </summary>
+    public string NegotiationPath => _negotiationPath;
+
+    /// <summary>True when MF's video processor produces the output frames, so no software color conversion runs.</summary>
+    public bool UsesAdvancedVideoProcessing => _negotiationPath == "advanced";
+
+    /// <summary>MF_MT_DEFAULT_STRIDE of the negotiated output type (negative = bottom-up).</summary>
+    public int NegotiatedStride => _stride;
+
+    /// <summary>Byte count of the last MF sample buffer, for verifying the negotiated size.</summary>
+    public int LastSampleBytes => Volatile.Read(ref _lastSampleBytes);
 
     /// <summary>Raised with a tight NV12 buffer (stride == width) at the output size; the buffer is reused.</summary>
     public event Action<byte[]>? FrameReady;
@@ -87,92 +121,209 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
     private bool StartCore()
     {
         string symbolicLink = ResolveSymbolicLink();
-        AppLog.Write($"MF-MJPEG({_name}): opening '{symbolicLink}' target {_outWidth}x{_outHeight}");
+        AppLog.Write($"MF-MJPEG({_name}): opening '{symbolicLink}' target {_outWidth}x{_outHeight} @ {_fpsNum}/{_fpsDen}");
 
+        // Nothing must survive from a previous attempt: both attempts open their
+        // own device source and reader.
+        TeardownObjects();
+
+        // Attempt 1 asks for NV12 at the destination size with advanced video
+        // processing enabled, so Media Foundation's video processor MFT performs
+        // decode + scale + color conversion and the frame handler never touches
+        // ColorConverter. Attempt 2 is the pre-existing decoder-only path. Only
+        // when both fail does the caller fall back to WinRT + software conversion.
+        if (TryOpen(symbolicLink, advanced: PreferAdvancedVideoProcessing, out string reason))
+        {
+            _negotiationPath = PreferAdvancedVideoProcessing ? "advanced" : "legacy";
+        }
+        else if (PreferAdvancedVideoProcessing)
+        {
+            AppLog.Write($"MF-MJPEG({_name}): advanced NV12 {_outWidth}x{_outHeight} unavailable ({reason}); retrying without advanced video processing");
+            if (!TryOpen(symbolicLink, advanced: false, out reason))
+            {
+                _negotiationPath = "none";
+                AppLog.Write($"MF-MJPEG({_name}): NV12 negotiation failed on both paths ({reason}); caller falls back to WinRT + software conversion");
+                return false;
+            }
+            _negotiationPath = "legacy";
+        }
+        else
+        {
+            _negotiationPath = "none";
+            AppLog.Write($"MF-MJPEG({_name}): NV12 negotiation failed ({reason}); caller falls back to WinRT + software conversion");
+            return false;
+        }
+
+        _frame = new byte[Protocol.Nv12Size(_outWidth, _outHeight)];
+        AppLog.Write($"MF-MJPEG({_name}): output NV12 {_outWidth}x{_outHeight} @ {_fpsNum}/{_fpsDen} stride={_stride} path={_negotiationPath}");
+
+        _stop = false;
+        _thread = new Thread(ReadLoop)
+        {
+            IsBackground = true,
+            Name = $"MF-MJPEG {_name}"
+        };
+        _thread.SetApartmentState(ApartmentState.MTA);
+        _thread.Start();
+        return true;
+    }
+
+    /// <summary>
+    /// Opens the device plus a source reader and negotiates NV12 output at the
+    /// configured size/rate. Always leaves <c>_reader</c>/<c>_source</c> null on
+    /// failure so the next attempt starts clean. Never throws.
+    /// </summary>
+    private bool TryOpen(string symbolicLink, bool advanced, out string reason)
+    {
+        reason = "";
         IMFAttributes? deviceAttributes = null;
         IMFAttributes? readerAttributes = null;
+        IMFMediaSource? source = null;
+        IMFSourceReader? reader = null;
         IMFMediaType? nativeType = null;
+        bool adopted = false;
+
         try
         {
             deviceAttributes = MediaFactory.MFCreateAttributes(4);
             Check(deviceAttributes.Set(CaptureDeviceAttributeKeys.SourceType, CaptureDeviceAttributeKeys.SourceTypeVidcap), "Set SourceType");
             Check(deviceAttributes.Set(CaptureDeviceAttributeKeys.SourceTypeVidcapSymbolicLink, symbolicLink), "Set SourceTypeVidcapSymbolicLink");
 
-            _source = MediaFactory.MFCreateDeviceSource(deviceAttributes);
-            AppLog.Write($"MF-MJPEG({_name}): device source created");
+            source = MediaFactory.MFCreateDeviceSource(deviceAttributes);
 
             // Empty attributes are fine here; passing null to the COM call is not
             // guaranteed to be accepted by the wrapper.
-            readerAttributes = MediaFactory.MFCreateAttributes(0);
-            _reader = MediaFactory.MFCreateSourceReaderFromMediaSource(_source, readerAttributes);
+            readerAttributes = MediaFactory.MFCreateAttributes(advanced ? 1u : 0u);
+            if (advanced)
+            {
+                var avf = readerAttributes.Set(SourceReaderAttributeKeys.EnableAdvancedVideoProcessing, 1u);
+                if (avf.Failure)
+                    AppLog.Write($"MF-MJPEG({_name}): MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING refused 0x{avf.Code:X8}");
+            }
 
-            nativeType = FindNativeMjpgType();
+            reader = MediaFactory.MFCreateSourceReaderFromMediaSource(source, readerAttributes);
+
+            nativeType = FindNativeMjpgType(reader);
             if (nativeType == null)
             {
-                AppLog.Write($"MF-MJPEG({_name}): no native MJPG type at {_outWidth}x{_outHeight}");
+                reason = $"no native MJPG type at {_outWidth}x{_outHeight}";
                 return false;
             }
 
-            using (var readerEx = _reader.QueryInterface<IMFSourceReaderEx>())
+            using (var readerEx = reader.QueryInterface<IMFSourceReaderEx>())
             {
                 var nativeResult = readerEx.SetNativeMediaType(0, nativeType, out int nativeFlags);
                 if (nativeResult.Failure)
                 {
-                    AppLog.Write($"MF-MJPEG({_name}): SetNativeMediaType failed 0x{nativeResult.Code:X8} {nativeResult.Description}");
+                    reason = $"SetNativeMediaType 0x{nativeResult.Code:X8} {nativeResult.Description}";
                     return false;
                 }
-                AppLog.Write($"MF-MJPEG({_name}): native type pinned, flags=0x{nativeFlags:X}");
+            AppLog.Write($"MF-MJPEG({_name}): native type pinned, flags=0x{nativeFlags:X} (advanced={advanced})");
             }
-            nativeType.Dispose();
-            nativeType = null;
+            // nativeType stays alive until the finally block: its frame rate is used
+            // below if the configured rate is refused.
 
-            // Output type: NV12 at the exact output size. Negotiating this is where
-            // Media Foundation inserts the MJPEG decoder between source and reader.
+            // Output type: NV12 at the exact output size, the configured rate, and
+            // square pixels. Negotiating this is where Media Foundation inserts the
+            // MJPEG decoder and - with advanced video processing - the video
+            // processor that does the scaling and color conversion.
+            int nativeNum = 0, nativeDen = 0;
+            if (TryUInt64(nativeType, MediaTypeAttributeKeys.FrameRate, out ulong nativeRate))
+            {
+                MediaFactory.UnpackRatio(nativeRate, out uint nn, out uint nd);
+                nativeNum = (int)nn;
+                nativeDen = (int)nd;
+            }
+
             using var outputType = MediaFactory.MFCreateMediaType();
             Check(outputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video), "Set MajorType");
             Check(outputType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12), "Set Subtype");
             Check(MediaFactory.MFSetAttributeSize(outputType, MediaTypeAttributeKeys.FrameSize, (uint)_outWidth, (uint)_outHeight), "Set FrameSize");
-            Check(MediaFactory.MFSetAttributeRatio(outputType, MediaTypeAttributeKeys.FrameRate, 30, 1), "Set FrameRate");
+            Check(MediaFactory.MFSetAttributeRatio(outputType, MediaTypeAttributeKeys.FrameRate, (uint)_fpsNum, (uint)_fpsDen), "Set FrameRate");
+            Check(MediaFactory.MFSetAttributeRatio(outputType, MediaTypeAttributeKeys.PixelAspectRatio, 1, 1), "Set PixelAspectRatio");
             Check(outputType.Set(MediaTypeAttributeKeys.InterlaceMode, (uint)VideoInterlaceMode.Progressive), "Set InterlaceMode");
             Check(outputType.Set(MediaTypeAttributeKeys.AllSamplesIndependent, 1u), "Set AllSamplesIndependent");
 
             try
             {
-                _reader.SetCurrentMediaType(0, outputType);
+                reader.SetCurrentMediaType(0, outputType);
             }
             catch (Exception ex)
             {
-                AppLog.Write($"MF-MJPEG({_name}): SetCurrentMediaType(NV12) failed {Hr(ex)}");
-                return false;
+                // Some devices refuse a rate they do not offer. Fall back once to the
+                // rate of the type that was actually pinned; the pipe is drop-latest,
+                // so the rate here only describes the stream.
+                bool retried = false;
+                if (nativeNum > 0 && nativeDen > 0 && (nativeNum != _fpsNum || nativeDen != _fpsDen))
+                {
+                    try
+                    {
+                        Check(MediaFactory.MFSetAttributeRatio(outputType, MediaTypeAttributeKeys.FrameRate, (uint)nativeNum, (uint)nativeDen), "Set FrameRate(native)");
+                        reader.SetCurrentMediaType(0, outputType);
+                        retried = true;
+                        AppLog.Write($"MF-MJPEG({_name}): configured {_fpsNum}/{_fpsDen} refused, using native {nativeNum}/{nativeDen}");
+                    }
+                    catch (Exception)
+                    {
+                        retried = false;
+                    }
+                }
+
+                if (!retried)
+                {
+                    reason = $"SetCurrentMediaType(NV12 {_outWidth}x{_outHeight}) {Hr(ex)}";
+                    return false;
+                }
             }
 
-            if (!ReadNegotiatedType(out int width, out int height, out int num, out int den))
+            if (!ReadNegotiatedType(reader, out int width, out int height, out int num, out int den, out int stride))
+            {
+                reason = "GetCurrentMediaType failed";
                 return false;
+            }
 
             if (width != _outWidth || height != _outHeight)
             {
-                AppLog.Write($"MF-MJPEG({_name}): negotiated {width}x{height} != requested {_outWidth}x{_outHeight}; falling back");
+                reason = $"negotiated {width}x{height} != requested {_outWidth}x{_outHeight}";
                 return false;
             }
 
-            _frame = new byte[Protocol.Nv12Size(_outWidth, _outHeight)];
-            AppLog.Write($"MF-MJPEG({_name}): output NV12 {width}x{height} @ {num}/{den} stride={_stride}");
-
-            _stop = false;
-            _thread = new Thread(ReadLoop)
+            if (stride == 0)
+                stride = width;
+            if (Math.Abs(stride) < width)
             {
-                IsBackground = true,
-                Name = $"MF-MJPEG {_name}"
-            };
-            _thread.SetApartmentState(ApartmentState.MTA);
-            _thread.Start();
+                reason = $"negotiated stride {stride} is narrower than {width}";
+                return false;
+            }
+
+            AppLog.Write($"MF-MJPEG({_name}): negotiated NV12 {width}x{height} @ {num}/{den} stride={stride} (advanced={advanced})");
+
+            _reader = reader;
+            _source = source;
+            _stride = stride;
+            adopted = true;
             return true;
+        }
+        catch (Exception ex)
+        {
+            reason = Hr(ex);
+            return false;
         }
         finally
         {
             nativeType?.Dispose();
             readerAttributes?.Dispose();
             deviceAttributes?.Dispose();
+
+            if (!adopted)
+            {
+                try { reader?.Dispose(); } catch { }
+                if (source != null)
+                {
+                    try { source.Shutdown(); } catch { }
+                    try { source.Dispose(); } catch { }
+                }
+            }
         }
     }
 
@@ -180,7 +331,7 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
     /// Looks for the camera's native MJPG type at the requested size, preferring
     /// an exact 30/1 frame rate and otherwise the highest rate at that size.
     /// </summary>
-    private IMFMediaType? FindNativeMjpgType()
+    private IMFMediaType? FindNativeMjpgType(IMFSourceReader reader)
     {
         IMFMediaType? best = null;
         int bestScore = -1;
@@ -192,7 +343,7 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
             IMFMediaType type;
             try
             {
-                type = _reader!.GetNativeMediaType(0, i);
+                type = reader.GetNativeMediaType(0, i);
             }
             catch (Exception)
             {
@@ -262,42 +413,60 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
         return best;
     }
 
-    private bool ReadNegotiatedType(out int width, out int height, out int num, out int den)
+    /// <summary>
+    /// Reads back the negotiated output type. Pure: it reports what it found and
+    /// leaves <c>_stride</c> alone so a failed attempt cannot leak state.
+    /// </summary>
+    private bool ReadNegotiatedType(
+        IMFSourceReader reader, out int width, out int height, out int num, out int den, out int stride)
     {
         width = _outWidth;
         height = _outHeight;
-        num = 30;
-        den = 1;
+        num = _fpsNum;
+        den = _fpsDen;
+        stride = 0;
 
-        using var current = _reader!.GetCurrentMediaType(0);
-        Guid? subtype = TryGuid(current, MediaTypeAttributeKeys.Subtype);
-        if (subtype == null || subtype.Value != VideoFormatGuids.NV12)
-            AppLog.Write($"MF-MJPEG({_name}): WARNING negotiated subtype is {SubtypeName(subtype ?? Guid.Empty)}");
-
-        if (TryUInt64(current, MediaTypeAttributeKeys.FrameSize, out ulong packedSize))
+        IMFMediaType current;
+        try
         {
-            MediaFactory.UnpackSize(packedSize, out uint w, out uint h);
-            width = (int)w;
-            height = (int)h;
+            current = reader.GetCurrentMediaType(0);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Write($"MF-MJPEG({_name}): GetCurrentMediaType failed {Hr(ex)}");
+            return false;
         }
 
-        if (TryUInt64(current, MediaTypeAttributeKeys.FrameRate, out ulong packedRate))
+        using (current)
         {
-            MediaFactory.UnpackRatio(packedRate, out uint n, out uint d);
-            num = (int)n;
-            den = (int)d;
+            Guid? subtype = TryGuid(current, MediaTypeAttributeKeys.Subtype);
+            if (subtype == null || subtype.Value != VideoFormatGuids.NV12)
+                AppLog.Write($"MF-MJPEG({_name}): WARNING negotiated subtype is {SubtypeName(subtype ?? Guid.Empty)}");
+
+            if (TryUInt64(current, MediaTypeAttributeKeys.FrameSize, out ulong packedSize))
+            {
+                MediaFactory.UnpackSize(packedSize, out uint w, out uint h);
+                width = (int)w;
+                height = (int)h;
+            }
+
+            if (TryUInt64(current, MediaTypeAttributeKeys.FrameRate, out ulong packedRate))
+            {
+                MediaFactory.UnpackRatio(packedRate, out uint n, out uint d);
+                num = (int)n;
+                den = (int)d;
+            }
+
+            // The default stride is only known after the media type is negotiated,
+            // and it is NOT necessarily equal to the width. A negative value means
+            // the buffer is bottom-up.
+            if (TryUInt32(current, MediaTypeAttributeKeys.DefaultStride, out uint defaultStride) && defaultStride != 0)
+                stride = (int)defaultStride;
         }
 
-        // The default stride is only known after the media type is negotiated, and
-        // it is NOT necessarily equal to the width. A negative value means the
-        // buffer is bottom-up.
-        _stride = 0;
-        if (TryUInt32(current, MediaTypeAttributeKeys.DefaultStride, out uint stride) && stride != 0)
-            _stride = (int)stride;
-        if (_stride == 0)
-            _stride = _outWidth;
+        if (stride == 0)
+            stride = width;
 
-        AppLog.Write($"MF-MJPEG({_name}): negotiated {SubtypeName(subtype ?? Guid.Empty)} {width}x{height} {num}/{den} stride={_stride}");
         return true;
     }
 
@@ -335,6 +504,9 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
                             AppLog.Write($"MF-MJPEG({_name}): ReadSample reported an error");
                             break;
                         }
+                        // Neither a sample nor a terminal flag: wait briefly so a
+                        // reader that keeps returning null cannot spin a core.
+                        Thread.Sleep(1);
                         continue;
                     }
                 }
@@ -388,6 +560,8 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
             buffer.Lock(out IntPtr data, out _, out int currentLength);
             try
             {
+                Volatile.Write(ref _lastSampleBytes, currentLength);
+
                 int absStride = Math.Abs(_stride);
                 int needed = absStride * _outHeight + absStride * (_outHeight / 2);
                 if (currentLength < needed)
@@ -398,7 +572,7 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
                 }
 
                 fixed (byte* dst = _frame)
-                    CopyNv12Tight((byte*)data, dst, _outWidth, _outHeight, _stride);
+                    CopyNv12Tight((byte*)data, dst, _frame.Length, _outWidth, _outHeight, _stride);
                 return true;
             }
             finally
@@ -418,11 +592,23 @@ public sealed class MfMjpegSource : IDisposable, IAsyncDisposable
         }
     }
 
-    private static unsafe void CopyNv12Tight(byte* src, byte* dst, int w, int h, int stride)
+    /// <summary>
+    /// Copies the sample's NV12 planes into the tight destination buffer. When the
+    /// buffer is top-down and its stride equals the width, Y and UV are already
+    /// contiguous, so one copy covers the whole frame instead of one per row.
+    /// </summary>
+    private static unsafe void CopyNv12Tight(byte* src, byte* dst, int dstLength, int w, int h, int stride)
     {
         int abs = Math.Abs(stride);
         bool bottomUp = stride < 0;
         int uvHeight = h / 2;
+        int tight = w * h + w * uvHeight;
+
+        if (!bottomUp && abs == w && tight <= dstLength)
+        {
+            Buffer.MemoryCopy(src, dst, dstLength, tight);
+            return;
+        }
 
         for (int y = 0; y < h; y++)
         {

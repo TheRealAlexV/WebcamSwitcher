@@ -13,4 +13,9 @@
   <ItemGroup>
     <ProjectReference Include="..\WebcamSwitcher.Core\WebcamSwitcher.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Harness only (tools/VcamTest): lets it drive the per-slot contract with a
+         fake native layer. No runtime effect on the shipped app. -->
+    <InternalsVisibleTo Include="WebcamSwitcher.VcamTest" />
+  </ItemGroup>
 </Project>

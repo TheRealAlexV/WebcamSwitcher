@@ -28,6 +28,23 @@ public partial class SettingsWindow : Window
         InitializeComponent();
         _pipeline = pipeline;
         Loaded += async (_, _) => await InitializeAsync();
+
+        // Delay boxes are live while typing, so anything not applied must be
+        // pushed back on the way out. Without this, Cancel (or the close button)
+        // would leave the running engine holding values that were never saved,
+        // and the next launch would silently differ from what the user saw.
+        Closed += (_, _) =>
+        {
+            if (DialogResult != true)
+                RevertLiveDelays();
+        };
+    }
+
+    /// <summary>Restores the saved config's delays on the running engine.</summary>
+    private void RevertLiveDelays()
+    {
+        var config = _pipeline.Config;
+        _pipeline.ApplyDelaysLive(config.CommonDelayMs, config.Cameras.Select(c => c.DelayMs).ToList());
     }
 
     private async Task InitializeAsync()
@@ -49,6 +66,7 @@ public partial class SettingsWindow : Window
         FpsCombo.Text = config.Fps.ToString();
 
         RotateHotkeyBox.Text = config.RotateHotkey ?? "";
+        CommonDelayBox.Text = config.CommonDelayMs.ToString();
         StartWithWindowsBox.IsChecked = config.StartWithWindows;
         StartMinimizedBox.IsChecked = config.StartMinimized;
         VirtualCameraOnLaunchBox.IsChecked = config.VirtualCameraOnLaunch;
@@ -60,7 +78,34 @@ public partial class SettingsWindow : Window
             AddRow(config.Cameras[i], hotkey);
         }
 
-        NoteText.Text = "Camera and format changes apply immediately. A consumer app may need to re-open the camera to pick up a new resolution.";
+        NoteText.Text = "Camera and format changes apply immediately. A consumer app may need to re-open the camera to pick up a new resolution. Delays also apply as you type; Apply saves them.";
+
+        // Wired last so the initial load above does not count as an edit.
+        CommonDelayBox.TextChanged += (_, _) => ApplyDelaysLiveNow();
+    }
+
+    /// <summary>
+    /// Applies the delay boxes to the running cameras at once, without saving and
+    /// without rebuilding the pipeline (a rebuild would disconnect every virtual
+    /// camera). Stays silent while a box is mid-edit or out of range: Apply reports
+    /// invalid input properly, and a half-typed number must not reach the engine.
+    /// </summary>
+    private void ApplyDelaysLiveNow()
+    {
+        if (!int.TryParse(CommonDelayBox.Text.Trim(), out int common) ||
+            common < 0 || common > AppConfig.MaxDelayMs)
+            return;
+
+        var delays = new List<int>(_rows.Count);
+        foreach (var row in _rows)
+        {
+            if (!int.TryParse(row.DelayBox.Text.Trim(), out int ms) ||
+                ms < 0 || ms > AppConfig.MaxDelayMs)
+                return;   // one invalid box: apply nothing rather than a mixed set
+            delays.Add(ms);
+        }
+
+        _pipeline.ApplyDelaysLive(common, delays);
     }
 
     private void AddCamera_Click(object sender, RoutedEventArgs e) => AddRow(null, "");
@@ -69,6 +114,10 @@ public partial class SettingsWindow : Window
     {
         var row = new CameraRow(_devices, cam, hotkey, RemoveRow, _rows.Count);
         _rows.Add(row);
+        // Delay is content only, so it is pushed into the running engine as soon as
+        // it is typed: the value can be tuned against a live picture without closing
+        // this dialog. Apply still persists it to config.json.
+        row.DelayBox.TextChanged += (_, _) => ApplyDelaysLiveNow();
         CamerasPanel.Children.Add(row.Panel);
     }
 
@@ -86,7 +135,14 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        var next = new AppConfig { Width = w, Height = h, Fps = fps };
+        if (!int.TryParse(CommonDelayBox.Text.Trim(), out int commonDelayMs) ||
+            commonDelayMs < 0 || commonDelayMs > AppConfig.MaxDelayMs)
+        {
+            MessageBox.Show(this, $"Common video delay must be a number from 0 to {AppConfig.MaxDelayMs} ms.", "Invalid delay", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var next = new AppConfig { Width = w, Height = h, Fps = fps, CommonDelayMs = commonDelayMs };
 
         var cameras = new List<CameraConfig>();
         var hotkeys = new List<string>();
@@ -103,6 +159,12 @@ public partial class SettingsWindow : Window
                 MessageBox.Show(this, $"Invalid hotkey '{row.HotkeyBox.Text}'. Use e.g. 'Ctrl+Alt+1'.", "Invalid hotkey", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
+            if (!int.TryParse(row.DelayBox.Text.Trim(), out int delayMs) ||
+                delayMs < 0 || delayMs > AppConfig.MaxDelayMs)
+            {
+                MessageBox.Show(this, $"Delay for '{sel.FriendlyName}' must be a number from 0 to {AppConfig.MaxDelayMs} ms.", "Invalid delay", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
             var (cw, ch) = row.SelectedCapture;
             cameras.Add(new CameraConfig
             {
@@ -110,7 +172,8 @@ public partial class SettingsWindow : Window
                 FriendlyName = sel.FriendlyName,
                 CaptureWidth = cw,
                 CaptureHeight = ch,
-                CaptureFormat = row.SelectedFormat
+                CaptureFormat = row.SelectedFormat,
+                DelayMs = delayMs
             });
             hotkeys.Add(row.HotkeyBox.Text);
         }
@@ -158,6 +221,7 @@ public partial class SettingsWindow : Window
         public ComboBox Combo { get; }
         public ComboBox CaptureCombo { get; }
         public ComboBox FormatCombo { get; }
+        public TextBox DelayBox { get; }
         public TextBox HotkeyBox { get; }
 
         private static readonly string[] CaptureSizes =
@@ -239,6 +303,14 @@ public partial class SettingsWindow : Window
                 ToolTip = "Capture format. Auto keeps NV12 when it runs at full rate and switches to MJPG when that is the only way to reach the output frame rate."
             };
 
+            DelayBox = new TextBox
+            {
+                Width = 52,
+                Text = Math.Clamp(selected?.DelayMs ?? 0, 0, AppConfig.MaxDelayMs).ToString(),
+                ToolTip = $"Extra video delay for this camera in milliseconds (0-{AppConfig.MaxDelayMs}). Added to the common delay so every camera this app exposes presents the same latency."
+            };
+            System.Windows.Automation.AutomationProperties.SetAutomationId(DelayBox, "DelayBox" + index);
+
             var removeBtn = new Button
             {
                 Content = "Remove",
@@ -272,6 +344,14 @@ public partial class SettingsWindow : Window
                 Margin = new Thickness(8, 0, 6, 0)
             };
 
+            var delayLabel = new TextBlock
+            {
+                Text = "Delay (ms)",
+                Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 6, 0)
+            };
+
             // WrapPanel so the extra controls flow onto a second line on narrow
             // windows instead of being clipped by the fixed-width dialog.
             Panel = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 6) };
@@ -280,6 +360,8 @@ public partial class SettingsWindow : Window
             Panel.Children.Add(CaptureCombo);
             Panel.Children.Add(fmtLabel);
             Panel.Children.Add(FormatCombo);
+            Panel.Children.Add(delayLabel);
+            Panel.Children.Add(DelayBox);
             Panel.Children.Add(label);
             Panel.Children.Add(HotkeyBox);
             Panel.Children.Add(removeBtn);

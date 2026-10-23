@@ -60,6 +60,16 @@ STDMETHODIMP Activator::ActivateObject(REFIID riid, void** ppv)
 STDMETHODIMP Activator::ShutdownObject()
 {
 	WINTRACE(L"Activator::ShutdownObject");
+
+	// The Frame Server calls this when the client detaches. Shut the source down
+	// here so the pipe reader thread stops instead of pulling frames forever.
+	// Idempotent: a second call (or a source already torn down) returns
+	// MF_E_SHUTDOWN, which is expected and not an error.
+	if (_source)
+	{
+		const HRESULT hr = _source->Shutdown();
+		LOG_HR_IF(hr, FAILED(hr) && hr != MF_E_SHUTDOWN);
+	}
 	return S_OK;
 }
 

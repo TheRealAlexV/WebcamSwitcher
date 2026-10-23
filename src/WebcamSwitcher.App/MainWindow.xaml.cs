@@ -2,8 +2,10 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using WebcamSwitcher.Core;
+using Button = System.Windows.Controls.Button;
 
 namespace WebcamSwitcher.App;
 
@@ -14,6 +16,9 @@ public partial class MainWindow : Window
     private readonly object _renderLock = new();
     private readonly Dictionary<int, long> _lastRenderTicks = new();
 
+    // True while the global button is applying all slots at once. Chips are
+    // locked during that time so the two controls cannot fight each other.
+
     public MainWindow(PipelineController pipeline)
     {
         InitializeComponent();
@@ -23,16 +28,28 @@ public partial class MainWindow : Window
         _pipeline.VirtualCameraStateChanged += OnStateChanged;
         _pipeline.CaptureStateChanged += OnStateChanged;
         _pipeline.PreviewsStateChanged += OnStateChanged;
+        _pipeline.VcamStateChanged += OnVcamStateChanged;
 
         RebuildPreviews();
         UpdateToggles();
+
+        // Minimised or hidden windows cannot show previews: stop converting them.
+        // Frames keep flowing to the virtual cameras either way, and the first
+        // frame after restore is converted normally.
+        StateChanged += (_, _) => UpdatePreviewVisibility();
+        IsVisibleChanged += (_, _) => UpdatePreviewVisibility();
+        UpdatePreviewVisibility();
+    }
+
+    private void UpdatePreviewVisibility()
+    {
+        _pipeline.SetPreviewsVisible(IsVisible && WindowState != WindowState.Minimized);
     }
 
     private void OnStateChanged() => Dispatcher.BeginInvoke(UpdateToggles);
 
     private void UpdateToggles()
     {
-        VcamToggle.Content = _pipeline.VirtualCameraActive ? "Virtual Camera: ON" : "Virtual Camera: OFF";
         CaptureToggle.Content = _pipeline.CaptureActive ? "Cameras: ON" : "Cameras: OFF";
         PreviewsToggle.Content = _pipeline.PreviewsActive ? "Previews: ON" : "Previews: OFF";
 
@@ -40,21 +57,116 @@ public partial class MainWindow : Window
         PreviewScroller.Visibility = previews ? Visibility.Visible : Visibility.Collapsed;
         PreviewsOffText.Visibility = previews ? Visibility.Collapsed : Visibility.Visible;
 
+        UpdateVcamToggle();
         UpdateStatus();
     }
+
+    // ----- Virtual camera state -----
+
+    private void OnVcamStateChanged()
+    {
+        if (Dispatcher.CheckAccess())
+            RefreshVcamUi();
+        else
+            Dispatcher.BeginInvoke(RefreshVcamUi);
+    }
+
+    /// <summary>Pulls the real per-slot state into the tiles and the global button.</summary>
+    private void RefreshVcamUi()
+    {
+        int count = _pipeline.CameraCount;
+
+        for (int i = 0; i < _previews.Count; i++)
+        {
+            var vm = _previews[i];
+
+            if (vm.Index >= 0 && vm.Index < count)
+                vm.ApplyVcamState(_pipeline.IsVcamRunning(vm.Index), _pipeline.IsVcamBusy(vm.Index));
+            else
+                vm.ApplyVcamState(false, false); // camera list shrank under the tile
+        }
+
+        UpdateVcamToggle();
+        UpdateStatus();
+    }
+
+    /// <summary>
+    /// The main button owns the switcher virtual camera and nothing else. Each
+    /// passthrough camera has its own switch on its preview tile, so starting or
+    /// stopping the switcher never disturbs them.
+    /// </summary>
+    private void UpdateVcamToggle()
+    {
+        bool running = _pipeline.IsSwitcherVcamRunning;
+        bool busy = _pipeline.IsSwitcherVcamBusy;
+
+        VcamToggle.Content = busy
+            ? "Virtual Camera: ..."
+            : running
+                ? "Virtual Camera: ON"
+                : "Virtual Camera: OFF";
+
+        VcamToggle.IsEnabled = !busy;
+    }
+
+    private async void VcamToggle_Click(object sender, RoutedEventArgs e)
+    {
+        bool turnOn = !_pipeline.IsSwitcherVcamRunning;
+        UpdateVcamToggle();
+
+        try
+        {
+            await _pipeline.SetSwitcherVcamRunningAsync(turnOn);
+        }
+        catch
+        {
+            // The pipeline reports failures through its state events.
+        }
+
+        RefreshVcamUi();
+    }
+
+    // ----- Per-tile switches -----
+
+    private async void VcamChip_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true; // never let the chip click also select the tile
+        if (sender is not Button { DataContext: PreviewVm vm })
+            return;
+
+        // Busy, locked by the global button, or a stale tile after a camera
+        // change: ignore the click instead of starting overlapping work.
+        if (!vm.VcamClickable || vm.Index < 0 || vm.Index >= _pipeline.CameraCount)
+            return;
+
+        // Capture the direction once: the chip words itself from this for the
+        // whole call, since a stop clears Running long before it finishes.
+        bool turnOn = !vm.VcamRunning;
+        vm.BeginVcamChange(turnOn);
+
+        bool ok;
+        try
+        {
+            ok = await _pipeline.SetVcamRunningAsync(vm.Index, turnOn);
+        }
+        catch
+        {
+            ok = false;
+        }
+
+        RefreshVcamUi();
+
+        if (ok)
+            vm.ClearVcamFailure();
+        else
+            vm.MarkVcamFailed();
+    }
+
+    // ----- Previews -----
 
     private void PreviewsToggle_Click(object sender, RoutedEventArgs e)
     {
         _pipeline.SetPreviewsEnabled(!_pipeline.PreviewsActive);
-        UpdateToggles();
-    }
-
-    private void VcamToggle_Click(object sender, RoutedEventArgs e)
-    {
-        if (_pipeline.VirtualCameraActive)
-            _pipeline.StopVirtualCamera();
-        else
-            _pipeline.StartVirtualCamera();
         UpdateToggles();
     }
 
@@ -85,7 +197,7 @@ public partial class MainWindow : Window
         }
 
         UpdateActive();
-        UpdateStatus();
+        RefreshVcamUi();
     }
 
     private void OnPreview(int idx, PreviewVm vm, byte[] bgra)
@@ -114,11 +226,29 @@ public partial class MainWindow : Window
 
     private void Preview_Click(object sender, MouseButtonEventArgs e)
     {
+        // Clicks that land on the chip never select the camera.
+        if (IsInsideButton(e.OriginalSource as DependencyObject))
+            return;
+
         if (sender is Border b && b.Tag is int idx)
         {
             _pipeline.ActiveIndex = idx;
             UpdateActive();
         }
+    }
+
+    private static bool IsInsideButton(DependencyObject? node)
+    {
+        while (node != null)
+        {
+            if (node is Button)
+                return true;
+
+            node = node is Visual || node is System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(node)
+                : LogicalTreeHelper.GetParent(node);
+        }
+        return false;
     }
 
     private void UpdateActive()
@@ -134,8 +264,18 @@ public partial class MainWindow : Window
         var cam = _pipeline.CaptureActive
             ? $"{_pipeline.Sources.Count} camera(s) · {cfg.Width}x{cfg.Height} @ {cfg.Fps}fps"
             : "capture stopped";
-        var vcam = _pipeline.VirtualCameraActive ? "vCam ON" : "vCam OFF";
-        StatusText.Text = $"{cam} · {vcam}";
+
+        int passthrough = 0;
+        for (int i = 0; i < _pipeline.CameraCount; i++)
+            if (_pipeline.IsVcamRunning(i))
+                passthrough++;
+
+        string switcher = _pipeline.IsSwitcherVcamRunning ? "switcher on" : "switcher off";
+        string pass = _pipeline.CameraCount == 0
+            ? "no passthrough cameras"
+            : $"passthrough {passthrough}/{_pipeline.CameraCount} on";
+
+        StatusText.Text = $"{cam} · {switcher} · {pass}";
     }
 
     private void Settings_Click(object sender, RoutedEventArgs e)

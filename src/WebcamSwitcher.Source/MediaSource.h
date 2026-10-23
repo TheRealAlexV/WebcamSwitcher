@@ -55,8 +55,9 @@ public:
 	HRESULT Initialize(IMFAttributes* attributes);
 
 	// Maps the virtual camera's friendly name (set by the Frame Server at
-	// ActivateObject time) to its pipe via %ProgramData%\WebcamSwitcher\vcams.ini
-	// and starts the frame client. Idempotent; falls back to the switcher pipe.
+	// ActivateObject time) to its pipe via %ProgramData%\WebcamSwitcher\vcams.ini.
+	// Idempotent; falls back to the switcher pipe. Does not start the frame
+	// client: Start() does, Stop()/Shutdown() stop it again.
 	HRESULT BindCamera(const std::wstring& friendlyName);
 
 private:

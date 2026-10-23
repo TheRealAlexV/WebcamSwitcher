@@ -6,8 +6,14 @@ namespace WebcamSwitcher.App;
 
 public static class ConfigService
 {
+    /// <summary>
+    /// Test hook: points persistence at a scratch file so a harness never edits
+    /// the running app's configuration. Null in production.
+    /// </summary>
+    internal static string? PathOverride { get; set; }
+
     private static string Path =>
-        System.IO.Path.Combine(
+        PathOverride ?? System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "WebcamSwitcher", "config.json");
 

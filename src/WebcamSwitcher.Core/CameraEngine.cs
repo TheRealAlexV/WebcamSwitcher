@@ -21,6 +21,16 @@ public sealed class CameraEngine : IAsyncDisposable
     private int _activeSlot = -1;
     private ulong _sequence;
 
+    // Per-slot delay stage. One pass-through-bypassed delay line per config slot,
+    // so every virtual camera this app exposes can hold the same latency and
+    // switching in OBS never shifts A/V sync. The delay is content only: it sits
+    // between the capture callback and the publishers, upstream of the native
+    // source, which never learns about it and keeps its own sample timing.
+    private FrameDelayBuffer?[] _delays = Array.Empty<FrameDelayBuffer?>();
+    private int[] _slotDelayMs = Array.Empty<int>();
+    private int[] _slotFps = Array.Empty<int>();
+    private int _commonDelayMs;
+
     public IReadOnlyList<CameraSource> Sources => _sources;
 
     public int ActiveIndex
@@ -47,6 +57,7 @@ public sealed class CameraEngine : IAsyncDisposable
     }
 
     private volatile bool _previewsEnabled = true;
+    private volatile bool _previewsVisible = true;
 
     /// <summary>
     /// Propagated to every source. When false, per-frame preview downscaling is
@@ -58,10 +69,34 @@ public sealed class CameraEngine : IAsyncDisposable
         set
         {
             _previewsEnabled = value;
-            // Snapshot: StartAsync may still be assembling sources on its own thread.
-            foreach (var s in _sources.ToArray())
-                s.PreviewEnabled = value;
+            PushPreviewState();
         }
+    }
+
+    /// <summary>
+    /// False while the app window is minimised or hidden: previews then cost
+    /// nothing, because nobody can see them. Combined with
+    /// <see cref="PreviewsEnabled"/>; capture and publishing are unaffected.
+    /// </summary>
+    public bool PreviewsVisible
+    {
+        get => _previewsVisible;
+        set
+        {
+            if (_previewsVisible == value)
+                return;
+            _previewsVisible = value;
+            PushPreviewState();
+            AppLog.Write($"Previews: window {(value ? "visible" : "hidden")}, conversion {(value && _previewsEnabled ? "on" : "off")}");
+        }
+    }
+
+    private void PushPreviewState()
+    {
+        bool on = _previewsEnabled && _previewsVisible;
+        // Snapshot: StartAsync may still be assembling sources on its own thread.
+        foreach (var s in _sources.ToArray())
+            s.PreviewEnabled = on;
     }
 
     /// <param name="publishers">
@@ -73,6 +108,92 @@ public sealed class CameraEngine : IAsyncDisposable
     {
         _publishers = publishers;
         _switcher = switcher;
+        EnsureDelaySlots(publishers.Count);
+    }
+
+    /// <summary>
+    /// Sets one camera slot's own delay in milliseconds (default 0). The change
+    /// takes effect on the next published frame: no engine rebuild, no restart of
+    /// any virtual camera.
+    /// </summary>
+    public void SetSlotDelay(int slot, int ms)
+    {
+        if (slot < 0 || slot >= _slotDelayMs.Length)
+        {
+            AppLog.Write($"Engine.SetSlotDelay({slot}): no such camera slot");
+            return;
+        }
+        Volatile.Write(ref _slotDelayMs[slot], Math.Clamp(ms, 0, AppConfig.MaxDelayMs));
+        ApplyDelay(slot);
+    }
+
+    /// <summary>
+    /// Sets the delay added to every camera, in milliseconds (default 0). Applied
+    /// live to every slot, exactly like <see cref="SetSlotDelay"/>.
+    /// </summary>
+    public void SetCommonDelay(int ms)
+    {
+        Volatile.Write(ref _commonDelayMs, Math.Clamp(ms, 0, AppConfig.MaxDelayMs));
+        for (int i = 0; i < _delays.Length; i++)
+            ApplyDelay(i);
+    }
+
+    /// <summary>
+    /// Recomputes one slot's ring depth from its own delay plus the common delay,
+    /// in frames at that camera's rate. Depth 0 frees the ring, so an unset delay
+    /// holds no memory and copies nothing.
+    /// </summary>
+    private void ApplyDelay(int slot)
+    {
+        if (slot < 0 || slot >= _delays.Length)
+            return;
+        var buffer = _delays[slot];
+        if (buffer == null)
+            return;
+
+        int ms = Volatile.Read(ref _slotDelayMs[slot]) + Volatile.Read(ref _commonDelayMs);
+        int fps = slot < _slotFps.Length ? _slotFps[slot] : 0;
+        int depth = DelayFrames(ms, fps);
+        if (buffer.Depth == depth)
+            return;   // unchanged: nothing to reconfigure, nothing to log
+
+        buffer.Configure(depth);
+        AppLog.Write($"Delay: slot {slot} {ms} ms @ {(fps > 0 ? fps : Protocol.DefaultFps)} fps -> depth {depth}");
+    }
+
+    /// <summary>
+    /// Milliseconds to whole frames at the camera's advertised rate. The rate is
+    /// the one requested for capture; a source that reports nothing usable falls
+    /// back to <see cref="Protocol.DefaultFps"/>.
+    /// </summary>
+    private static int DelayFrames(int delayMs, int fps)
+    {
+        if (delayMs <= 0)
+            return 0;
+        if (fps <= 0)
+            fps = Protocol.DefaultFps;
+        return Math.Clamp((int)Math.Round(delayMs * (double)fps / 1000.0), 0, FrameDelayBuffer.MaxDepth);
+    }
+
+    /// <summary>
+    /// Guarantees the per-slot delay arrays cover <paramref name="count"/> slots,
+    /// keeping any delay already configured.
+    /// </summary>
+    private void EnsureDelaySlots(int count)
+    {
+        if (_delays.Length >= count && _slotDelayMs.Length >= count && _slotFps.Length >= count)
+            return;
+
+        int size = Math.Max(count, _delays.Length);
+        var delays = new FrameDelayBuffer?[size];
+        var ms = new int[size];
+        var fps = new int[size];
+        Array.Copy(_delays, delays, _delays.Length);
+        Array.Copy(_slotDelayMs, ms, _slotDelayMs.Length);
+        Array.Copy(_slotFps, fps, _slotFps.Length);
+        _delays = delays;
+        _slotDelayMs = ms;
+        _slotFps = fps;
     }
 
     /// <summary>Enumerates available video capture devices (id + name).</summary>
@@ -86,6 +207,17 @@ public sealed class CameraEngine : IAsyncDisposable
     {
         int w = config.Width, h = config.Height;
         int count = config.Cameras.Count;
+
+        // Delay lines are sized before any source starts: Publish runs on each
+        // camera's callback thread from its first frame on.
+        EnsureDelaySlots(count);
+        Volatile.Write(ref _commonDelayMs, Math.Clamp(config.CommonDelayMs, 0, AppConfig.MaxDelayMs));
+        for (int i = 0; i < count; i++)
+        {
+            Volatile.Write(ref _slotDelayMs[i],
+                Math.Clamp(config.Cameras[i].DelayMs, 0, AppConfig.MaxDelayMs));
+            _delays[i] ??= new FrameDelayBuffer();
+        }
 
         // Enumerate the frame source groups once and share the list with every
         // camera, instead of each CameraSource performing its own device scan.
@@ -103,9 +235,12 @@ public sealed class CameraEngine : IAsyncDisposable
                 continue;
 
             var source = new CameraSource(c.DeviceId, c.FriendlyName);
-            source.PreviewEnabled = _previewsEnabled;
+            source.PreviewEnabled = _previewsEnabled && _previewsVisible;
             source.PreferSmooth30Fps = config.PreferSmooth30Fps;
+            source.CaptureFps = config.Fps;
             source.PreferredFormat = string.IsNullOrWhiteSpace(c.CaptureFormat) ? "Auto" : c.CaptureFormat;
+            _slotFps[i] = source.CaptureFps;
+            ApplyDelay(i);
             int slot = i;
             source.FrameReady += nv12 => Publish(slot, nv12, w, h);
             sources[i] = source;
@@ -168,6 +303,18 @@ public sealed class CameraEngine : IAsyncDisposable
 
     private void Publish(int slot, byte[] nv12, int w, int h)
     {
+        // Delay stage, ahead of both publishes below so the passthrough pipe and
+        // the switcher always see the same frame. While a ring is filling it
+        // reports false and the frame that just arrived goes out immediately, so
+        // the delay can never stall a virtual camera; once full it hands back the
+        // frame from Depth frames ago, strictly in order.
+        if (slot >= 0 && slot < _delays.Length)
+        {
+            var delay = _delays[slot];
+            if (delay != null && delay.TryPush(nv12, out byte[]? delayed) && delayed != null)
+                nv12 = delayed;
+        }
+
         var info = new WsFrameInfo
         {
             Sequence = Interlocked.Increment(ref _sequence),
@@ -180,9 +327,15 @@ public sealed class CameraEngine : IAsyncDisposable
             Flags = Protocol.FlagNone
         };
 
-        // Continuous passthrough: every slot always drives its own pipe.
+        // Continuous passthrough: every slot always drives its own pipe, but only
+        // while something reads it. Skipping the publish skips its frame copy;
+        // a vcam that connects later simply starts with the next frame.
         if (slot >= 0 && slot < _publishers.Count)
-            _publishers[slot].PublishFrame(nv12, info);
+        {
+            var passthrough = _publishers[slot];
+            if (passthrough.ClientCount > 0)
+                passthrough.PublishFrame(nv12, info);
+        }
 
         // The switcher mirrors whichever config slot is currently active.
         if (slot == ActiveSlot)
@@ -200,6 +353,10 @@ public sealed class CameraEngine : IAsyncDisposable
         _sources.Clear();
         _slotFor.Clear();
         Volatile.Write(ref _activeSlot, -1);
+
+        // Release the delay rings: on disable a slot must hold no frame memory.
+        foreach (var delay in _delays)
+            delay?.Configure(0);
 
         // Dispose every publisher (each passthrough + the switcher). Dispose is
         // idempotent, so the owning PipelineController disposing them again is safe.

@@ -3,6 +3,133 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="WebcamSwitcher" Width="740" Height="520"
         WindowStartupLocation="CenterScreen" Background="#1E1E1E">
+    <Window.Resources>
+        <!-- Tooltips: quiet, readable, one sentence. -->
+        <Style TargetType="ToolTip">
+            <Setter Property="Background" Value="#2A2A2A"/>
+            <Setter Property="Foreground" Value="#E6E6E6"/>
+            <Setter Property="BorderBrush" Value="#444444"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="MaxWidth" Value="320"/>
+            <Setter Property="HasDropShadow" Value="False"/>
+            <Setter Property="ContentTemplate">
+                <Setter.Value>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" TextWrapping="Wrap" LineHeight="17"/>
+                    </DataTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Per-tile virtual camera chip: a small state pill in the bottom
+             corner, away from the top-left camera label. -->
+        <DataTemplate x:Key="VcamChipContent">
+            <StackPanel Orientation="Horizontal">
+                <Ellipse Width="6" Height="6" Margin="0,0,5,0" VerticalAlignment="Center">
+                    <Ellipse.Style>
+                        <Style TargetType="Ellipse">
+                            <Setter Property="Fill" Value="#8A8A8A"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding VcamRunning}" Value="True">
+                                    <Setter Property="Fill" Value="#59C46B"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding VcamBusy}" Value="True">
+                                    <Setter Property="Fill" Value="#FFB300"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding VcamFailed}" Value="True">
+                                    <Setter Property="Fill" Value="#E05252"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Ellipse.Style>
+                </Ellipse>
+                <TextBlock Text="{Binding VcamText}" FontSize="11" FontWeight="SemiBold"/>
+            </StackPanel>
+        </DataTemplate>
+
+        <Style x:Key="ChipFocusVisual">
+            <Setter Property="Control.Template">
+                <Setter.Value>
+                    <ControlTemplate>
+                        <Border Margin="-2" CornerRadius="12"
+                                BorderBrush="#F5F5F5" BorderThickness="1"
+                                SnapsToDevicePixels="True"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="VcamChipStyle" TargetType="Button">
+            <!-- Shown only when the keyboard is driving the UI. -->
+            <Setter Property="FocusVisualStyle" Value="{StaticResource ChipFocusVisual}"/>
+            <Setter Property="Padding" Value="7,3"/>
+            <Setter Property="Background" Value="#E61C1C1C"/>
+            <Setter Property="BorderBrush" Value="#444444"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Foreground" Value="#C8C8C8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="KeyboardNavigation.AcceptsReturn" Value="True"/>
+            <Setter Property="ToolTipService.ShowOnDisabled" Value="True"/>
+            <!-- Content is the PreviewVm so the chip template can read its state. -->
+            <Setter Property="Content" Value="{Binding}"/>
+            <Setter Property="ToolTip" Value="{Binding VcamHint}"/>
+            <Setter Property="ToolTipService.InitialShowDelay" Value="300"/>
+            <Setter Property="ToolTipService.ShowDuration" Value="15000"/>
+            <Setter Property="AutomationProperties.Name" Value="{Binding VcamAutomationName}"/>
+            <Setter Property="ContentTemplate" Value="{StaticResource VcamChipContent}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Border x:Name="Pill"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="10"
+                                    Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <!-- Softer hover instead of a hard colour jump. -->
+                            <Border x:Name="Hover" CornerRadius="10" Background="#1AFFFFFF"
+                                    Opacity="0" IsHitTestVisible="False"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Hover" Property="Opacity" Value="1"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Hover" Property="Background" Value="#30000000"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Hover" Property="Opacity" Value="0"/>
+                                <Setter TargetName="Pill" Property="Opacity" Value="0.72"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding VcamRunning}" Value="True">
+                    <Setter Property="Background" Value="#E6182E1F"/>
+                    <Setter Property="BorderBrush" Value="#4CAF50"/>
+                    <Setter Property="Foreground" Value="#E4F7E8"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding VcamBusy}" Value="True">
+                    <Setter Property="Background" Value="#E62E2718"/>
+                    <Setter Property="BorderBrush" Value="#FFB300"/>
+                    <Setter Property="Foreground" Value="#FFE0A3"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding VcamFailed}" Value="True">
+                    <Setter Property="Background" Value="#E62E1A1A"/>
+                    <Setter Property="BorderBrush" Value="#E05252"/>
+                    <Setter Property="Foreground" Value="#FFC2C2"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
@@ -35,6 +162,17 @@
                                 <Image Source="{Binding Bitmap}" Stretch="Uniform"/>
                                 <TextBlock Text="{Binding Label}" Foreground="White" Background="#AA000000"
                                            Padding="6,3" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+
+                                <!-- Clicking toggles only this camera's virtual camera.
+                                     The handler marks the click handled so the tile is
+                                     not also selected; this control is the only
+                                     interactive element inside the tile. -->
+                                <Button Style="{StaticResource VcamChipStyle}"
+                                        IsEnabled="{Binding VcamClickable}"
+                                        HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                        Margin="0,0,8,8"
+                                        Click="VcamChip_Click"
+                                        AutomationProperties.AutomationId="{Binding VcamAutomationId}"/>
                             </Grid>
                         </Border>
                     </DataTemplate>
@@ -53,7 +191,9 @@
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
             <Button x:Name="VcamToggle" Content="Virtual Camera: OFF" Padding="10,6" Click="VcamToggle_Click"
                     Background="#333" Foreground="White" Margin="0,0,8,0"
-                    AutomationProperties.AutomationId="VcamToggle"/>
+                    AutomationProperties.AutomationId="VcamToggle"
+                    ToolTip="The switcher camera only. Each camera's own passthrough camera has its switch on its preview tile."
+                    ToolTipService.InitialShowDelay="400"/>
             <Button x:Name="CaptureToggle" Content="Cameras: ON" Padding="10,6" Click="CaptureToggle_Click"
                     Background="#333" Foreground="White" Margin="0,0,8,0"
                     AutomationProperties.AutomationId="CaptureToggle"/>

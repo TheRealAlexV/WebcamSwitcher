@@ -16,7 +16,8 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 
 	// NOTE: the frame client is NOT started here. The per-instance friendly
 	// name that selects the pipe is only set by the Frame Server at
-	// ActivateObject time, so BindCamera() starts it there (see Activator.cpp).
+	// ActivateObject time (BindCamera), and the reader itself runs only between
+	// MediaSource::Start() and MediaSource::Stop()/Shutdown().
 
 	wil::com_ptr_nothrow<IMFSensorProfileCollection> collection;
 	RETURN_IF_FAILED(MFCreateSensorProfileCollection(&collection));
@@ -199,7 +200,10 @@ HRESULT MediaSource::BindCamera(const std::wstring& friendlyName)
 
 	WINTRACE(L"MediaSource::BindCamera '%s' -> '%s'", friendlyName.c_str(), pipeName.c_str());
 	_client.SetPipeName(pipeName);
-	return _client.Start();
+
+	// The reader is started by MediaSource::Start() and stopped by Stop(), so no
+	// thread pulls frames while no client has the stream running yet.
+	return S_OK;
 }
 
 int MediaSource::GetStreamIndexById(DWORD id)
@@ -288,10 +292,18 @@ STDMETHODIMP MediaSource::Pause()
 
 STDMETHODIMP MediaSource::Shutdown()
 {
-	winrt::slim_lock_guard lock(_lock);
-	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
+	// Validate under the lock, then stop the reader outside it: the reader thread
+	// may be parked in a pipe read and joining it must not happen while _lock is
+	// held (Stop()/Shutdown() can otherwise deadlock with a concurrent caller).
+	{
+		winrt::slim_lock_guard lock(_lock);
+		RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
+	}
 
 	_client.Stop();
+
+	winrt::slim_lock_guard lock(_lock);
+	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue);
 
 	LOG_IF_FAILED_MSG(_queue->Shutdown(), "Queue shutdown failed");
 	_queue.reset();
@@ -317,6 +329,11 @@ STDMETHODIMP MediaSource::Start(IMFPresentationDescriptor* pPresentationDescript
 	DWORD count;
 	RETURN_IF_FAILED(pPresentationDescriptor->GetStreamDescriptorCount(&count));
 	RETURN_HR_IF_MSG(E_INVALIDARG, count != (DWORD)_streams.size(), "Invalid number of descriptor streams");
+
+	// The frame reader only runs between Start() and Stop(). A reader that cannot
+	// start (or a pipe that is down) is not a reason to fail the activation: the
+	// reader reconnects on its own and the stream serves placeholder samples.
+	LOG_IF_FAILED_MSG(_client.Start(), "PipeFrameClient::Start failed");
 
 	wil::unique_prop_variant time;
 	RETURN_IF_FAILED(InitPropVariantFromInt64(MFGetSystemTime(), &time));
@@ -380,6 +397,10 @@ STDMETHODIMP MediaSource::Start(IMFPresentationDescriptor* pPresentationDescript
 
 STDMETHODIMP MediaSource::Stop()
 {
+	// Stop the pipe reader first and outside _lock: joining the reader must not
+	// happen while holding the source lock.
+	_client.Stop();
+
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_descriptor);
 
